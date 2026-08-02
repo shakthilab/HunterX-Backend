@@ -1,0 +1,670 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model auth_providers {
+  id          BigInt             @id @default(autoincrement())
+  user_id     BigInt
+  provider    auth_provider_type
+  provider_id String?            @db.VarChar(255)
+  created_at  DateTime?          @default(now()) @db.Timestamp(6)
+  users       users              @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([provider, provider_id])
+  @@index([user_id], map: "idx_auth_providers_user")
+}
+
+model avatars {
+  id              BigInt    @id @default(autoincrement())
+  name            String    @db.VarChar(100)
+  image_url       String    @db.VarChar(500)
+  unlock_at_level Int       @default(0)
+  is_active       Boolean   @default(true)
+  created_at      DateTime? @default(now()) @db.Timestamp(6)
+  users           users[]
+}
+
+model badges {
+  id          BigInt        @id @default(autoincrement())
+  name        String        @unique @db.VarChar(100)
+  description String?       @db.VarChar(500)
+  image_url   String?       @db.VarChar(500)
+  badge_type  badge_type
+  created_at  DateTime?     @default(now()) @db.Timestamp(6)
+  campaigns   campaigns[]
+  levels      levels[]
+  user_badges user_badges[]
+}
+
+model campaigns {
+  id              BigInt    @id @default(autoincrement())
+  season_id       BigInt?
+  title           String    @db.VarChar(255)
+  description     String?
+  start_date      DateTime? @db.Date
+  end_date        DateTime? @db.Date
+  reward_badge_id BigInt?
+  is_active       Boolean   @default(false)
+  created_at      DateTime? @default(now()) @db.Timestamp(6)
+  badges          badges?   @relation(fields: [reward_badge_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  seasons         seasons?  @relation(fields: [season_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model discovery_interests {
+  id                       BigInt                     @id @default(autoincrement())
+  name                     String                     @unique @db.VarChar(100)
+  icon                     String?                    @db.VarChar(100)
+  user_discovery_interests user_discovery_interests[]
+}
+
+model discovery_matches {
+  id                                          BigInt       @id @default(autoincrement())
+  user_a_id                                   BigInt
+  user_b_id                                   BigInt
+  status                                      match_status @default(MATCHED)
+  matched_at                                  DateTime?    @default(now()) @db.Timestamp(6)
+  unmatched_at                                DateTime?    @db.Timestamp(6)
+  unmatched_by                                BigInt?
+  users_discovery_matches_unmatched_byTousers users?       @relation("discovery_matches_unmatched_byTousers", fields: [unmatched_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_discovery_matches_user_a_idTousers    users        @relation("discovery_matches_user_a_idTousers", fields: [user_a_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_discovery_matches_user_b_idTousers    users        @relation("discovery_matches_user_b_idTousers", fields: [user_b_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  messages                                    messages[]
+
+  @@unique([user_a_id, user_b_id])
+  @@index([user_a_id], map: "idx_matches_user_a")
+  @@index([user_b_id], map: "idx_matches_user_b")
+}
+
+model discovery_swipes {
+  id                                      BigInt          @id @default(autoincrement())
+  swiper_id                               BigInt
+  swiped_id                               BigInt
+  direction                               swipe_direction
+  created_at                              DateTime?       @default(now()) @db.Timestamp(6)
+  users_discovery_swipes_swiped_idTousers users           @relation("discovery_swipes_swiped_idTousers", fields: [swiped_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_discovery_swipes_swiper_idTousers users           @relation("discovery_swipes_swiper_idTousers", fields: [swiper_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([swiper_id, swiped_id])
+  @@index([swiped_id], map: "idx_swipes_swiped")
+  @@index([swiper_id], map: "idx_swipes_swiper")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model dragon_stages {
+  id                     BigInt                   @id @default(autoincrement())
+  stage_number           Int                      @unique
+  name                   String                   @db.VarChar(100)
+  rank_name              String                   @db.VarChar(100)
+  lore                   String
+  unlock_message         String
+  level_range_start      Int
+  level_range_end        Int
+  primary_color          String                   @db.VarChar(7)
+  glow_color             String                   @db.VarChar(7)
+  idle_animation         String?                  @db.VarChar(200)
+  levelup_animation      String?                  @db.VarChar(200)
+  evolution_animation    String?                  @db.VarChar(200)
+  thumbnail_url          String?                  @db.VarChar(500)
+  created_at             DateTime?                @default(now()) @db.Timestamp(6)
+  user_dragon_evolutions user_dragon_evolutions[]
+  users                  users[]
+
+  @@index([stage_number], map: "idx_dragon_stage_number")
+}
+
+model health_metrics {
+  id             BigInt        @id @default(autoincrement())
+  user_id        BigInt
+  metric_date    DateTime      @db.Date
+  steps          Int?
+  distance_km    Float?
+  heart_rate_avg Int?
+  heart_rate_max Int?
+  calories       Int?
+  sleep_hours    Float?
+  active_minutes Int?
+  source         health_source @default(MANUAL)
+  created_at     DateTime?     @default(now()) @db.Timestamp(6)
+  users          users         @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, metric_date, source])
+  @@index([user_id, metric_date], map: "idx_health_user_date")
+}
+
+model leaderboard {
+  id            BigInt    @id @default(autoincrement())
+  user_id       BigInt    @unique
+  season_id     BigInt?
+  weekly_xp     Int       @default(0)
+  total_xp      Int       @default(0)
+  global_rank   Int?
+  previous_rank Int?
+  updated_at    DateTime? @default(now()) @db.Timestamp(6)
+  seasons       seasons?  @relation(fields: [season_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users         users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([season_id], map: "idx_leaderboard_season")
+  @@index([total_xp(sort: Desc)], map: "idx_leaderboard_total")
+  @@index([weekly_xp(sort: Desc)], map: "idx_leaderboard_weekly")
+}
+
+model levels {
+  id             BigInt  @id @default(autoincrement())
+  level_number   Int     @unique
+  xp_required    Int
+  badge_id       BigInt?
+  title          String? @db.VarChar(100)
+  rank_name      String? @db.VarChar(100)
+  unlock_message String?
+  badges         badges? @relation(fields: [badge_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model messages {
+  id                BigInt            @id @default(autoincrement())
+  match_id          BigInt
+  sender_id         BigInt
+  body              String
+  status            message_status    @default(SENT)
+  sent_at           DateTime?         @default(now()) @db.Timestamp(6)
+  read_at           DateTime?         @db.Timestamp(6)
+  discovery_matches discovery_matches @relation(fields: [match_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users             users             @relation(fields: [sender_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([match_id, sent_at], map: "idx_messages_match")
+}
+
+model notifications {
+  id         BigInt            @id @default(autoincrement())
+  user_id    BigInt?
+  type       notification_type
+  title      String            @db.VarChar(255)
+  body       String
+  image_url  String?           @db.VarChar(500)
+  data       Json?
+  quote_id   BigInt?
+  is_read    Boolean           @default(false)
+  sent_at    DateTime?         @default(now()) @db.Timestamp(6)
+  read_at    DateTime?         @db.Timestamp(6)
+  created_at DateTime?         @default(now()) @db.Timestamp(6)
+  quotes     quotes?           @relation(fields: [quote_id], references: [id], onUpdate: NoAction)
+  users      users?            @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([sent_at], map: "idx_notifications_sent")
+  @@index([user_id, is_read], map: "idx_notifications_user")
+}
+
+model quotes {
+  id               BigInt          @id @default(autoincrement())
+  quote_text       String
+  author_name      String          @db.VarChar(255)
+  author_image_url String?         @db.VarChar(500)
+  category         String?         @db.VarChar(100)
+  source           String?         @db.VarChar(100)
+  is_active        Boolean         @default(true)
+  created_at       DateTime?       @default(now()) @db.Timestamp(6)
+  notifications    notifications[]
+}
+
+model referrals {
+  id                                 BigInt    @id @default(autoincrement())
+  referrer_id                        BigInt
+  referred_id                        BigInt
+  xp_awarded                         Boolean   @default(false)
+  created_at                         DateTime? @default(now()) @db.Timestamp(6)
+  users_referrals_referred_idTousers users     @relation("referrals_referred_idTousers", fields: [referred_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_referrals_referrer_idTousers users     @relation("referrals_referrer_idTousers", fields: [referrer_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([referrer_id, referred_id])
+}
+
+model reward_partners {
+  id          BigInt        @id @default(autoincrement())
+  name        String        @db.VarChar(255)
+  logo_url    String?       @db.VarChar(500)
+  is_active   Boolean       @default(true)
+  created_at  DateTime?     @default(now()) @db.Timestamp(6)
+  reward_pool reward_pool[]
+}
+
+model reward_pool {
+  id              BigInt          @id @default(autoincrement())
+  partner_id      BigInt
+  coupon_code     String          @unique @db.VarChar(50)
+  discount_value  String?         @db.VarChar(100)
+  description     String?         @db.VarChar(500)
+  expires_at      DateTime?       @db.Timestamp(6)
+  is_assigned     Boolean         @default(false)
+  created_at      DateTime?       @default(now()) @db.Timestamp(6)
+  reward_partners reward_partners @relation(fields: [partner_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user_rewards    user_rewards[]
+}
+
+model seasons {
+  id          BigInt        @id @default(autoincrement())
+  name        String        @db.VarChar(100)
+  start_date  DateTime      @db.Date
+  end_date    DateTime      @db.Date
+  is_active   Boolean       @default(false)
+  created_at  DateTime?     @default(now()) @db.Timestamp(6)
+  campaigns   campaigns[]
+  leaderboard leaderboard[]
+}
+
+model streak_milestones {
+  id                     BigInt                   @id @default(autoincrement())
+  streak_days            Int                      @unique
+  reward_type            milestone_reward_type
+  xp_bonus               Int?                     @default(0)
+  description            String?                  @db.VarChar(500)
+  user_streak_milestones user_streak_milestones[]
+}
+
+model subscriptions {
+  id           BigInt                @id @default(autoincrement())
+  user_id      BigInt
+  plan         String                @default("monthly") @db.VarChar(50)
+  status       subscription_status   @default(ACTIVE)
+  platform     subscription_platform
+  receipt_data String?
+  started_at   DateTime              @default(now()) @db.Timestamp(6)
+  expires_at   DateTime              @db.Timestamp(6)
+  cancelled_at DateTime?             @db.Timestamp(6)
+  created_at   DateTime?             @default(now()) @db.Timestamp(6)
+  updated_at   DateTime?             @default(now()) @db.Timestamp(6)
+  users        users                 @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at], map: "idx_subscriptions_expires", where: raw("(status = 'ACTIVE'::subscription_status)"))
+  @@index([user_id, status], map: "idx_subscriptions_user")
+}
+
+model task_completions {
+  id             BigInt            @id @default(autoincrement())
+  user_id        BigInt
+  task_id        BigInt
+  schedule_date  DateTime          @db.Date
+  status         completion_status @default(COMPLETED)
+  progress_value Float?
+  xp_earned      Int               @default(0)
+  completed_at   DateTime?         @default(now()) @db.Timestamp(6)
+  created_at     DateTime?         @default(now()) @db.Timestamp(6)
+  tasks          tasks             @relation(fields: [task_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users          users             @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, task_id, schedule_date])
+  @@index([task_id, schedule_date], map: "idx_completions_task_date")
+  @@index([user_id, schedule_date], map: "idx_completions_user_date")
+}
+
+model task_schedule {
+  id          BigInt               @id @default(autoincrement())
+  task_id     BigInt
+  active_date DateTime             @db.Date
+  status      task_schedule_status @default(SCHEDULED)
+  created_at  DateTime?            @default(now()) @db.Timestamp(6)
+  tasks       tasks                @relation(fields: [task_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([task_id, active_date])
+  @@index([active_date, status], map: "idx_task_schedule_date")
+  @@index([task_id], map: "idx_task_schedule_task")
+}
+
+model tasks {
+  id               BigInt             @id @default(autoincrement())
+  title            String             @db.VarChar(255)
+  description      String?
+  tag              String?            @db.VarChar(100)
+  image_url        String?            @db.VarChar(500)
+  task_type        task_type
+  xp_reward        Int                @default(50)
+  xp_partial       Int                @default(25)
+  allows_partial   Boolean            @default(false)
+  target_value     Float?
+  target_unit      String?            @db.VarChar(50)
+  level_target     level_target       @default(ALL)
+  is_recurring     Boolean            @default(false)
+  is_active        Boolean            @default(true)
+  created_by       BigInt?
+  created_at       DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at       DateTime?          @default(now()) @db.Timestamp(6)
+  task_completions task_completions[]
+  task_schedule    task_schedule[]
+  users            users?             @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  xp_transactions  xp_transactions[]
+}
+
+model user_badges {
+  id        BigInt    @id @default(autoincrement())
+  user_id   BigInt
+  badge_id  BigInt
+  earned_at DateTime? @default(now()) @db.Timestamp(6)
+  badges    badges    @relation(fields: [badge_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users     users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, badge_id])
+}
+
+model user_discovery_interests {
+  id                  BigInt              @id @default(autoincrement())
+  user_id             BigInt
+  interest_id         BigInt
+  created_at          DateTime?           @default(now()) @db.Timestamp(6)
+  discovery_interests discovery_interests @relation(fields: [interest_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users               users               @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, interest_id])
+}
+
+model user_dragon_evolutions {
+  id                 BigInt        @id @default(autoincrement())
+  user_id            BigInt
+  stage_number       Int
+  level_at_evolution Int
+  evolved_at         DateTime?     @default(now()) @db.Timestamp(6)
+  dragon_stages      dragon_stages @relation(fields: [stage_number], references: [stage_number], onDelete: NoAction, onUpdate: NoAction)
+  users              users         @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, stage_number])
+  @@index([user_id], map: "idx_dragon_evolutions_user")
+}
+
+model user_fcm_tokens {
+  id         BigInt       @id @default(autoincrement())
+  user_id    BigInt
+  token      String       @db.VarChar(500)
+  platform   fcm_platform
+  is_active  Boolean      @default(true)
+  created_at DateTime?    @default(now()) @db.Timestamp(6)
+  users      users        @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, platform])
+}
+
+model user_onboarding_answers {
+  id          BigInt    @id @default(autoincrement())
+  user_id     BigInt
+  question_id Int
+  answer      String
+  created_at  DateTime? @default(now()) @db.Timestamp(6)
+  users       users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, question_id])
+  @@index([user_id], map: "idx_onboarding_answers_user")
+}
+
+model user_progression {
+  id                    BigInt    @id @default(autoincrement())
+  user_id               BigInt    @unique
+  total_xp              Int       @default(0)
+  current_level         Int       @default(1)
+  daily_streak          Int       @default(0)
+  weekly_streak         Int       @default(0)
+  longest_streak        Int       @default(0)
+  streak_multiplier     Float     @default(1.0)
+  consecutive_miss_days Int       @default(0)
+  last_active_date      DateTime? @db.Date
+  updated_at            DateTime? @default(now()) @db.Timestamp(6)
+  users                 users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model user_rewards {
+  id           BigInt         @id @default(autoincrement())
+  user_id      BigInt
+  pool_id      BigInt
+  trigger_type reward_trigger
+  status       reward_status  @default(ACTIVE)
+  assigned_at  DateTime?      @default(now()) @db.Timestamp(6)
+  claimed_at   DateTime?      @db.Timestamp(6)
+  expires_at   DateTime?      @db.Timestamp(6)
+  reward_pool  reward_pool    @relation(fields: [pool_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users        users          @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at], map: "idx_rewards_expires", where: raw("(status = 'ACTIVE'::reward_status)"))
+  @@index([user_id, status], map: "idx_rewards_user_status")
+}
+
+model user_streak_milestones {
+  id                BigInt            @id @default(autoincrement())
+  user_id           BigInt
+  milestone_id      BigInt
+  streak_days       Int
+  awarded_at        DateTime?         @default(now()) @db.Timestamp(6)
+  streak_milestones streak_milestones @relation(fields: [milestone_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users             users             @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, milestone_id])
+  @@index([user_id], map: "idx_streak_milestones_user")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model users {
+  id                                                      BigInt                     @id @default(autoincrement())
+  hunter_id                                               String                     @unique @db.VarChar(12)
+  name                                                    String                     @db.VarChar(100)
+  email                                                   String?                    @unique @db.VarChar(255)
+  avatar_id                                               BigInt?
+  role                                                    user_role                  @default(USER)
+  onboarding_done                                         Boolean                    @default(false)
+  onboarding_step                                         Int                        @default(0)
+  is_banned                                               Boolean                    @default(false)
+  referral_code                                           String                     @unique @db.VarChar(8)
+  referred_by                                             BigInt?
+  gender                                                  user_gender?
+  date_of_birth                                           DateTime?                  @db.Date
+  height_cm                                               Float?
+  weight_kg                                               Float?
+  bmi                                                     Float?
+  daily_protein_goal                                      Float?
+  fitness_level                                           fitness_level              @default(BEGINNER)
+  dragon_stage                                            Int                        @default(1)
+  streak_freeze_available                                 Boolean                    @default(false)
+  streak_freeze_used_this_month                           Boolean                    @default(false)
+  last_latitude                                           Float?
+  last_longitude                                          Float?
+  location_updated_at                                     DateTime?                  @db.Timestamp(6)
+  location_visible                                        Boolean                    @default(false)
+  password_hash                                           String?                    @db.VarChar(255)
+  reset_token                                             String?                    @db.VarChar(255)
+  reset_token_expiry                                      DateTime?                  @db.Timestamp(6)
+  oath_accepted                                           Boolean                    @default(false)
+  oath_accepted_at                                        DateTime?                  @db.Timestamp(6)
+  created_at                                              DateTime?                  @default(now()) @db.Timestamp(6)
+  updated_at                                              DateTime?                  @default(now()) @db.Timestamp(6)
+  auth_providers                                          auth_providers[]
+  discovery_matches_discovery_matches_unmatched_byTousers discovery_matches[]        @relation("discovery_matches_unmatched_byTousers")
+  discovery_matches_discovery_matches_user_a_idTousers    discovery_matches[]        @relation("discovery_matches_user_a_idTousers")
+  discovery_matches_discovery_matches_user_b_idTousers    discovery_matches[]        @relation("discovery_matches_user_b_idTousers")
+  discovery_swipes_discovery_swipes_swiped_idTousers      discovery_swipes[]         @relation("discovery_swipes_swiped_idTousers")
+  discovery_swipes_discovery_swipes_swiper_idTousers      discovery_swipes[]         @relation("discovery_swipes_swiper_idTousers")
+  health_metrics                                          health_metrics[]
+  leaderboard                                             leaderboard?
+  messages                                                messages[]
+  notifications                                           notifications[]
+  referrals_referrals_referred_idTousers                  referrals[]                @relation("referrals_referred_idTousers")
+  referrals_referrals_referrer_idTousers                  referrals[]                @relation("referrals_referrer_idTousers")
+  subscriptions                                           subscriptions[]
+  task_completions                                        task_completions[]
+  tasks                                                   tasks[]
+  user_badges                                             user_badges[]
+  user_discovery_interests                                user_discovery_interests[]
+  user_dragon_evolutions                                  user_dragon_evolutions[]
+  user_fcm_tokens                                         user_fcm_tokens[]
+  user_onboarding_answers                                 user_onboarding_answers[]
+  user_progression                                        user_progression?
+  user_rewards                                            user_rewards[]
+  user_streak_milestones                                  user_streak_milestones[]
+  dragon_stages                                           dragon_stages              @relation(fields: [dragon_stage], references: [stage_number], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_dragon_stage")
+  avatars                                                 avatars?                   @relation(fields: [avatar_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                                                   users?                     @relation("usersTousers", fields: [referred_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  other_users                                             users[]                    @relation("usersTousers")
+  xp_transactions                                         xp_transactions[]
+
+  @@index([email], map: "idx_users_email")
+  @@index([hunter_id], map: "idx_users_hunter_id")
+  @@index([last_latitude, last_longitude], map: "idx_users_location", where: raw("(location_visible = true)"))
+  @@index([referral_code], map: "idx_users_referral_code")
+}
+
+model xp_transactions {
+  id         BigInt    @id @default(autoincrement())
+  user_id    BigInt
+  task_id    BigInt?
+  amount     Int
+  reason     String    @db.VarChar(255)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  tasks      tasks?    @relation(fields: [task_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([created_at], map: "idx_xp_created_at")
+  @@index([user_id], map: "idx_xp_user_id")
+}
+
+model email_otps {
+  id         BigInt    @id @default(autoincrement())
+  email      String    @db.VarChar(255)
+  otp        String    @db.VarChar(6)
+  verified   Boolean   @default(false)
+  expires_at DateTime  @db.Timestamp(6)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+
+  @@index([email], map: "idx_email_otps_email")
+}
+
+enum auth_provider_type {
+  EMAIL
+  GOOGLE
+  APPLE
+}
+
+enum badge_type {
+  LEVEL
+  STREAK
+  ACHIEVEMENT
+  CAMPAIGN
+}
+
+enum completion_status {
+  COMPLETED
+  SKIPPED
+  PARTIAL
+}
+
+enum fcm_platform {
+  IOS
+  ANDROID
+}
+
+enum fitness_level {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum health_source {
+  APPLE_HEALTH
+  GOOGLE_FIT
+  MANUAL
+}
+
+enum level_target {
+  ALL
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum match_status {
+  PENDING
+  MATCHED
+  UNMATCHED
+  BLOCKED
+}
+
+enum message_status {
+  SENT
+  DELIVERED
+  READ
+}
+
+enum milestone_reward_type {
+  COUPON
+  BADGE
+  XP_BONUS
+}
+
+enum notification_type {
+  DAILY_MOTIVATION
+  STREAK_AT_RISK
+  TASK_REMINDER
+  STREAK_MILESTONE
+  LEVEL_UP
+  REWARD_READY
+  STREAK_FREEZE_USED
+  STREAK_BROKEN
+  MONTHLY_FREEZE
+  BROADCAST
+}
+
+enum reward_status {
+  ACTIVE
+  CLAIMED
+  EXPIRED
+}
+
+enum reward_trigger {
+  STREAK_7
+  STREAK_14
+  STREAK_21
+  STREAK_30
+  STREAK_60
+  STREAK_90
+  LEVEL_UP
+  REFERRAL
+  CAMPAIGN
+}
+
+enum subscription_platform {
+  IOS
+  ANDROID
+  WEB
+}
+
+enum subscription_status {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  TRIAL
+}
+
+enum swipe_direction {
+  LEFT
+  RIGHT
+}
+
+enum task_schedule_status {
+  SCHEDULED
+  ACTIVE
+  EXPIRED
+}
+
+enum task_type {
+  DAILY_FIXED
+  DAILY_ADMIN
+  WEEKLY
+}
+
+enum user_gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum user_role {
+  USER
+  ADMIN
+}

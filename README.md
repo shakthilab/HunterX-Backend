@@ -1,6 +1,6 @@
-# 🚀 Arise Backend
+# 🚀 HunterX Backend
 
-> **Arise Backend** is the core API powering the **Arise** ecosystem, providing authentication, habit management, XP progression, streak tracking, rewards, leaderboards, notifications, and admin functionality.
+> **HunterX Backend** is the core API powering the **HunterX** ecosystem, providing authentication, habit management, XP progression, streak tracking, rewards, leaderboards, notifications, and admin functionality.
 
 Built with **Node.js**, **Express**, and **Supabase**, and deployed on **Railway**.
 
@@ -8,7 +8,7 @@ Built with **Node.js**, **Express**, and **Supabase**, and deployed on **Railway
 
 ## 📖 Overview
 
-The backend serves both the **Arise Mobile App** and the **Arise Admin Portal**, handling all business logic, secure authentication, scheduled jobs, and real-time user progression.
+The backend serves both the **HunterX Mobile App** and the **HunterX Admin Portal**, handling all business logic, secure authentication, scheduled jobs, and real-time user progression.
 
 It is designed with a modular architecture, making it scalable, maintainable, and easy to extend as new game mechanics and social features are introduced.
 
@@ -105,7 +105,7 @@ It is designed with a modular architecture, making it scalable, maintainable, an
 ## 📂 Project Structure
 
 ```text
-arise-backend/
+hunterx-backend/
 │
 ├── src/
 │   ├── routes/          # API route definitions
@@ -139,9 +139,9 @@ arise-backend/
 ### Installation
 
 ```bash
-git clone https://github.com/<your-org>/arise-backend.git
+git clone https://github.com/<your-org>/hunterx-backend.git
 
-cd arise-backend
+cd hunterx-backend
 
 npm install
 ```
@@ -227,8 +227,8 @@ The backend automatically runs scheduled tasks to keep the application synchroni
 
 | Repository | Description |
 |------------|-------------|
-| **arise-mobile** | React Native mobile application |
-| **arise-admin** | Next.js Admin Dashboard |
+| **hunterx-mobile** | React Native mobile application |
+| **hunterx-admin** | Next.js Admin Dashboard |
 
 ---
 
@@ -242,7 +242,7 @@ The backend automatically runs scheduled tasks to keep the application synchroni
 
 ## 🎯 Vision
 
-The Arise Backend is built to support a scalable, gamified productivity platform where every completed habit contributes to meaningful personal growth. It serves as the foundation for future features including guilds, social challenges, AI-powered coaching, and health integrations.
+The HunterX Backend is built to support a scalable, gamified productivity platform where every completed habit contributes to meaningful personal growth. It serves as the foundation for future features including guilds, social challenges, AI-powered coaching, and health integrations.
 
 > **Powering discipline, one API request at a time.**
 
