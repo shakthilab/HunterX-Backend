@@ -134,13 +134,16 @@ async function processOnboarding(userId, answers) {
 
       case 8:
         // Self Assessment — map rank to fitness_level enum
-        // answer values: e_rank / d_rank / c_rank / b_rank / a_rank
+        // answer values: e_rank / d_rank / c_rank / b_rank / a_rank / beginner / intermediate / advanced
         const levelMap = {
           e_rank: 'BEGINNER',
           d_rank: 'BEGINNER',
           c_rank: 'BEGINNER',
           b_rank: 'INTERMEDIATE',
           a_rank: 'ADVANCED',
+          beginner: 'BEGINNER',
+          intermediate: 'INTERMEDIATE',
+          advanced: 'ADVANCED',
         };
         userUpdates.fitness_level = levelMap[a.answer] || 'BEGINNER';
         break;
@@ -236,7 +239,7 @@ async function createBaseUser({ name, email, provider, providerId, passwordHash 
 export async function sendOtp(email) {
   // Step 1 — Check email not already registered
   const existing = await prisma.users.findUnique({ where: { email } });
-  if (existing) throw new Error('EMAIL_EXISTS');
+  if (existing) throw new Error('email is already exist');
 
   // Step 2 — Generate 6 digit OTP
   const otp = Math.floor(100000 + Math.random() * 900000).toString();

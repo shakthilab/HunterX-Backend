@@ -33,8 +33,8 @@ router.post('/send-otp', authLimiter, async (req, res, next) => {
       'Verification code sent to your email. It expires in 10 minutes.');
 
   } catch (err) {
-    if (err.message === 'EMAIL_EXISTS')
-      return error(res, 'An account with this email already exists', 409);
+    if (err.message === 'email is already exist' || err.message === 'EMAIL_EXISTS')
+      return error(res, 'email is already exist', 400);
     next(err);
   }
 });
