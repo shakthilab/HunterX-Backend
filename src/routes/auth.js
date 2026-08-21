@@ -189,6 +189,10 @@ router.post('/google', authLimiter, async (req, res, next) => {
   } catch (err) {
     if (err.message === 'ACCOUNT_BANNED')
       return error(res, 'Your account has been suspended', 403);
+    if (err.message === 'INVALID_GOOGLE_TOKEN')
+      return error(res, 'Invalid or expired Google token', 401);
+    if (err.message === 'GOOGLE_NOT_CONFIGURED')
+      return error(res, 'Google sign-in is not configured on this server', 503);
     next(err);
   }
 });
@@ -326,6 +330,45 @@ router.post('/reset-password', async (req, res, next) => {
   } catch (err) {
     if (err.message === 'INVALID_OR_EXPIRED_TOKEN')
       return error(res, 'Reset link is invalid or has expired. Please request a new one.', 400);
+    next(err);
+  }
+});
+
+// ── POST /api/auth/complete-onboarding ────────────────────
+// For an already-authenticated user whose onboarding isn't done
+// yet (e.g. a Google/Apple account created from the Login screen,
+// before the onboarding wizard ran). Saves the wizard answers onto
+// the existing account — does not create a user or issue new tokens.
+// Header: Authorization: Bearer <access_token>
+// Body: { onboarding[] }
+
+router.post('/complete-onboarding', verifyToken, async (req, res, next) => {
+  try {
+    const { onboarding = [] } = req.body;
+
+    if (!Array.isArray(onboarding) || onboarding.length === 0)
+      return error(res, 'Onboarding answers are required', 400);
+
+    for (const a of onboarding) {
+      if (!a.questionId || a.answer === undefined || a.answer === null)
+        return error(res, 'Each onboarding answer needs questionId and answer', 400);
+      if (a.questionId < 1 || a.questionId > 10)
+        return error(res, `Invalid questionId ${a.questionId} — must be 1 to 10`, 400);
+    }
+
+    const user = await authService.completeOnboarding(req.user.id, onboarding);
+
+    return success(res, { user }, 'Onboarding complete. Welcome, Hunter.');
+
+  } catch (err) {
+    if (err.message === 'ONBOARDING_ALREADY_DONE')
+      return error(res, 'Onboarding has already been completed for this account', 409);
+    if (err.message === 'USER_NOT_FOUND')
+      return error(res, 'User not found', 404);
+    if (err.message === 'INVALID_ONBOARDING_ANSWER')
+      return error(res, 'Each onboarding answer needs questionId and answer', 400);
+    if (err.message === 'INVALID_QUESTION_ID')
+      return error(res, 'Invalid questionId — must be 1 to 10', 400);
     next(err);
   }
 });

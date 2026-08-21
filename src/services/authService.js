@@ -6,6 +6,7 @@ import { OAuth2Client } from 'google-auth-library';
 import appleSignin      from 'apple-signin-auth';
 import nodemailer        from 'nodemailer';
 import prisma            from '../config/prisma.js';
+import { logError }      from '../utils/logger.js';
 import {
   generateHunterId,
   generateReferralCode,
@@ -15,7 +16,17 @@ import {
   calculateProtein,
 } from '../utils/helpers.js';
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// Expo/React Native apps get Google ID tokens issued for different
+// client IDs per platform (web/iOS/Android), so verifyIdToken() must
+// accept whichever of them is actually configured as a valid audience.
+const GOOGLE_AUDIENCES = [
+  process.env.GOOGLE_CLIENT_ID_WEB,
+  process.env.GOOGLE_CLIENT_ID_IOS,
+  process.env.GOOGLE_CLIENT_ID_ANDROID,
+  process.env.GOOGLE_CLIENT_ID, // legacy/single-client fallback
+].filter(Boolean);
+
+const googleClient = new OAuth2Client();
 const mailTransporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -181,10 +192,28 @@ async function processOnboarding(userId, answers) {
         '1hr':      'active',
         '2hr_plus': 'very_active',
       };
-      const activityKey = activityMap[windowAns?.answer] || 'sedentary';
+      const rawWindowAnswer = windowAns?.answer;
+      const activityKey     = activityMap[rawWindowAnswer];
+
+      if (!activityKey) {
+        // Q9 answer didn't match any of the four values the mobile app is
+        // supposed to send. Falling back silently here previously caused
+        // protein goals to be quietly under-calculated (defaulted to
+        // SEDENTARY/0.8x) with no trace. Log loudly — with the actual
+        // unmapped value and the affected user — so this is caught
+        // immediately instead of corrupting data unnoticed. We still fall
+        // back to keep registration from failing on a bad enum value.
+        logError(
+          `Q9_ACTIVITY_MAP_MISMATCH: unrecognized training_window answer ` +
+          `${JSON.stringify(rawWindowAnswer)} for user ${bUserId}. ` +
+          `Expected one of "15min" | "30min" | "1hr" | "2hr_plus". ` +
+          `Defaulting to SEDENTARY (0.8x) — daily_protein_goal for this ` +
+          `user should be recalculated once the mismatch is fixed.`
+        );
+      }
 
       userUpdates.bmi                = calculateBMI(finalW, finalH);
-      userUpdates.daily_protein_goal = calculateProtein(finalW, activityKey);
+      userUpdates.daily_protein_goal = calculateProtein(finalW, activityKey || 'sedentary');
     }
   }
 
@@ -507,11 +536,18 @@ export async function loginWithEmail(email, password) {
 // ─────────────────────────────────────────────────────────────
 
 export async function loginWithGoogle(idToken, onboarding = []) {
-  // Verify Google token
-  const ticket = await googleClient.verifyIdToken({
-    idToken,
-    audience: process.env.GOOGLE_CLIENT_ID,
-  });
+  if (GOOGLE_AUDIENCES.length === 0) throw new Error('GOOGLE_NOT_CONFIGURED');
+
+  // Verify Google token — throws for expired/malformed/wrong-audience tokens
+  let ticket;
+  try {
+    ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: GOOGLE_AUDIENCES,
+    });
+  } catch {
+    throw new Error('INVALID_GOOGLE_TOKEN');
+  }
 
   const payload  = ticket.getPayload();
   const googleId = payload.sub;
@@ -797,6 +833,27 @@ export async function resetPassword(resetToken, newPassword) {
   });
 
   return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// COMPLETE ONBOARDING
+// For an already-authenticated user whose onboarding isn't done
+// yet — e.g. a Google/Apple account created straight from the
+// Login screen, before the onboarding wizard ran. Attaches the
+// wizard answers to the existing account instead of creating a
+// new one or issuing new tokens.
+// ─────────────────────────────────────────────────────────────
+
+export async function completeOnboarding(userId, onboarding = []) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  const user = await prisma.users.findUnique({ where: { id: bUserId } });
+  if (!user) throw new Error('USER_NOT_FOUND');
+  if (user.onboarding_done) throw new Error('ONBOARDING_ALREADY_DONE');
+
+  await processOnboarding(bUserId, onboarding);
+
+  return getCurrentUser(bUserId);
 }
 
 // ─────────────────────────────────────────────────────────────
