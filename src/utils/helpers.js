@@ -48,6 +48,28 @@ export function calculateProtein(weightKg, activityKey) {
   return parseFloat((weightKg * multiplier).toFixed(1));
 }
 
+// Today's date in IST (UTC+5:30), as a UTC-midnight Date — safe to store
+// in @db.Date columns (schedule_date) without timezone drift.
+// offsetDays lets callers shift forward/back (e.g. -1 for yesterday).
+export function getISTDateOnly(offsetDays = 0) {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  nowIST.setUTCDate(nowIST.getUTCDate() + offsetDays);
+  return new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()));
+}
+
+// Monday of the current IST week, as a UTC-midnight Date — used as the
+// schedule_date "period key" for WEEKLY tasks so a weekly quest has one
+// completion row per week instead of one per day.
+export function getISTWeekStart() {
+  const todayIST = getISTDateOnly();
+  const day = todayIST.getUTCDay(); // 0 = Sunday .. 6 = Saturday
+  const diffToMonday = day === 0 ? 6 : day - 1;
+  const monday = new Date(todayIST);
+  monday.setUTCDate(monday.getUTCDate() - diffToMonday);
+  return monday;
+}
+
 // Validate email format
 export function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);

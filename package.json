@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "check:q9-mismatches": "node scripts/check-q9-mismatches.js",
+    "seed:daily-tasks": "node scripts/seed-daily-tasks.js"
   },
   "keywords": [],
   "author": "",

@@ -2,6 +2,7 @@
 
 import { Router } from 'express';
 import authRouter from './auth.js';
+import tasksRouter from './tasks.js';
 
 const router = Router();
 
@@ -18,8 +19,10 @@ router.get('/health', (req, res) => {
 // Auth and onboarding
 router.use('/auth', authRouter);
 
+// Daily & weekly tasks
+router.use('/tasks', tasksRouter);
+
 // Coming soon — uncomment as each is built
-// router.use('/tasks',         tasksRouter);
 // router.use('/users',         usersRouter);
 // router.use('/xp',            xpRouter);
 // router.use('/rewards',       rewardsRouter);
