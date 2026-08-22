@@ -9,6 +9,7 @@ import { generalLimiter } from './middleware/rateLimiter.js';
 import { errorHandler }   from './middleware/errorHandler.js';
 import router             from './routes/index.js';
 import { info }           from './utils/logger.js';
+import './cron/midnight.js'; // starts the nightly task-assignment cron
 
 const app  = express();
 const PORT = process.env.PORT || 5000;

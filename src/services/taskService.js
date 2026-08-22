@@ -2,6 +2,7 @@
 
 import prisma from '../config/prisma.js';
 import { getISTDateOnly, getISTWeekStart } from '../utils/helpers.js';
+import { assignDailyTasks } from './taskAssignmentService.js';
 
 const DAILY_TYPES     = ['DAILY_FIXED', 'DAILY_ADMIN'];
 const VALID_STATUSES  = ['COMPLETED', 'PARTIAL', 'SKIPPED'];
@@ -18,7 +19,7 @@ function dateKey(date) {
 
 // Convention: a task with target_value = null and tag = 'NUTRITION' pulls
 // its target from the user's own calculated daily_protein_goal instead of
-// a fixed value on the task row (see scripts/seed-daily-tasks.js).
+// a fixed value on the task row (see prisma/seed.js).
 function resolveTarget(task, user) {
   if (task.target_value === null && task.tag === 'NUTRITION') {
     return user.daily_protein_goal ?? null;
@@ -42,29 +43,47 @@ export async function getTodayTasks(userId) {
 
   const todayDate     = getISTDateOnly();
   const weekStartDate = getISTWeekStart();
+  const weekEndDate   = new Date(weekStartDate);
+  weekEndDate.setUTCDate(weekEndDate.getUTCDate() + 6); // Sunday of the current ISO week
 
-  const tasks = await prisma.tasks.findMany({
-    where:   { is_active: true, task_type: { in: [...DAILY_TYPES, 'WEEKLY'] } },
-    orderBy: { id: 'asc' },
+  // Trigger C — request-time fallback. If this user has no task_schedule
+  // rows for today yet (cron didn't run, server was down, timezone edge
+  // case, brand-new user whose signup hook failed, etc.), assign them now
+  // so they're never shown an empty list. Idempotent — safe even if the
+  // nightly cron already ran for this user today.
+  const alreadyAssigned = await prisma.task_schedule.count({
+    where: { user_id: bUserId, active_date: todayDate },
   });
-
-  // Recurring tasks (is_recurring=true) are always live. Non-recurring
-  // tasks only show up on days/weeks an admin has scheduled them via
-  // task_schedule.
-  const nonRecurring = tasks.filter(t => !t.is_recurring);
-  let scheduledIds = new Set();
-  if (nonRecurring.length > 0) {
-    const schedules = await prisma.task_schedule.findMany({
-      where: {
-        task_id:     { in: nonRecurring.map(t => t.id) },
-        active_date: { in: [todayDate, weekStartDate] },
-        status:      { in: ['SCHEDULED', 'ACTIVE'] },
-      },
-    });
-    scheduledIds = new Set(schedules.map(s => s.task_id.toString()));
+  if (alreadyAssigned === 0) {
+    await assignDailyTasks(bUserId, todayDate);
   }
 
-  const eligible = tasks.filter(t => t.is_recurring || scheduledIds.has(t.id.toString()));
+  // Daily: whatever was assigned to this user for today.
+  const dailySchedule = await prisma.task_schedule.findMany({
+    where: {
+      user_id:     bUserId,
+      active_date: todayDate,
+      tasks:       { is_active: true, task_type: { in: DAILY_TYPES } },
+    },
+    include: { tasks: true },
+  });
+
+  // Weekly: assigned any day this ISO week (Mon–Sun) — once a weekly
+  // task is assigned on its recurrence day it stays visible/completable
+  // for the rest of the week, matching the week-keyed completion
+  // tracking below. `distinct` guards against a task recurring on more
+  // than one day this week producing duplicate rows.
+  const weeklySchedule = await prisma.task_schedule.findMany({
+    where: {
+      user_id:     bUserId,
+      active_date: { gte: weekStartDate, lte: weekEndDate },
+      tasks:       { is_active: true, task_type: 'WEEKLY' },
+    },
+    include:  { tasks: true },
+    distinct: ['task_id'],
+  });
+
+  const eligible = [...dailySchedule, ...weeklySchedule].map(s => s.tasks);
 
   const completions = await prisma.task_completions.findMany({
     where: {

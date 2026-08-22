@@ -302,39 +302,58 @@ model task_completions {
 
 model task_schedule {
   id          BigInt               @id @default(autoincrement())
+  user_id     BigInt
   task_id     BigInt
   active_date DateTime             @db.Date
   status      task_schedule_status @default(SCHEDULED)
   created_at  DateTime?            @default(now()) @db.Timestamp(6)
   tasks       tasks                @relation(fields: [task_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users       users                @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  @@unique([task_id, active_date])
+  @@unique([user_id, task_id, active_date])
   @@index([active_date, status], map: "idx_task_schedule_date")
   @@index([task_id], map: "idx_task_schedule_task")
+  @@index([user_id, active_date], map: "idx_task_schedule_user_date")
+}
+
+model task_admin_targets {
+  id         BigInt    @id @default(autoincrement())
+  task_id    BigInt
+  user_id    BigInt
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  tasks      tasks     @relation(fields: [task_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([task_id, user_id])
+  @@index([task_id], map: "idx_task_admin_targets_task")
 }
 
 model tasks {
-  id               BigInt             @id @default(autoincrement())
-  title            String             @db.VarChar(255)
-  description      String?
-  tag              String?            @db.VarChar(100)
-  image_url        String?            @db.VarChar(500)
-  task_type        task_type
-  xp_reward        Int                @default(50)
-  xp_partial       Int                @default(25)
-  allows_partial   Boolean            @default(false)
-  target_value     Float?
-  target_unit      String?            @db.VarChar(50)
-  level_target     level_target       @default(ALL)
-  is_recurring     Boolean            @default(false)
-  is_active        Boolean            @default(true)
-  created_by       BigInt?
-  created_at       DateTime?          @default(now()) @db.Timestamp(6)
-  updated_at       DateTime?          @default(now()) @db.Timestamp(6)
-  task_completions task_completions[]
-  task_schedule    task_schedule[]
-  users            users?             @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  xp_transactions  xp_transactions[]
+  id                 BigInt               @id @default(autoincrement())
+  title              String               @db.VarChar(255)
+  description        String?
+  tag                String?              @db.VarChar(100)
+  image_url          String?              @db.VarChar(500)
+  task_type          task_type
+  xp_reward          Int                  @default(50)
+  xp_partial         Int                  @default(25)
+  allows_partial     Boolean              @default(false)
+  target_value       Float?
+  target_unit        String?              @db.VarChar(50)
+  level_target       level_target         @default(ALL)
+  is_recurring       Boolean              @default(false)
+  is_default_daily   Boolean              @default(false)
+  recurrence_days    Int[]                @default([])
+  scheduled_date     DateTime?            @db.Date
+  is_active          Boolean              @default(true)
+  created_by         BigInt?
+  created_at         DateTime?            @default(now()) @db.Timestamp(6)
+  updated_at         DateTime?            @default(now()) @db.Timestamp(6)
+  task_admin_targets task_admin_targets[]
+  task_completions   task_completions[]
+  task_schedule      task_schedule[]
+  users              users?               @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  xp_transactions    xp_transactions[]
 }
 
 model user_badges {
@@ -487,7 +506,9 @@ model users {
   referrals_referrals_referred_idTousers                  referrals[]                @relation("referrals_referred_idTousers")
   referrals_referrals_referrer_idTousers                  referrals[]                @relation("referrals_referrer_idTousers")
   subscriptions                                           subscriptions[]
+  task_admin_targets                                      task_admin_targets[]
   task_completions                                        task_completions[]
+  task_schedule                                           task_schedule[]
   tasks                                                   tasks[]
   user_badges                                             user_badges[]
   user_discovery_interests                                user_discovery_interests[]

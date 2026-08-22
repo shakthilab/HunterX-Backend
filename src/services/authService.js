@@ -7,6 +7,8 @@ import appleSignin      from 'apple-signin-auth';
 import nodemailer        from 'nodemailer';
 import prisma            from '../config/prisma.js';
 import { logError }      from '../utils/logger.js';
+import { assignDailyTasks } from './taskAssignmentService.js';
+import { getISTDateOnly }   from '../utils/helpers.js';
 import {
   generateHunterId,
   generateReferralCode,
@@ -226,6 +228,18 @@ async function processOnboarding(userId, answers) {
     where: { id: bUserId },
     data:  userUpdates,
   });
+
+  // Trigger B of the automatic task-assignment system (see
+  // taskAssignmentService.js) — this is the one place all onboarding
+  // flows (register, Google, Apple, completeOnboarding) funnel through,
+  // so a new user gets today's tasks immediately instead of waiting for
+  // the nightly cron. Never let an assignment hiccup fail onboarding —
+  // the request-time fallback (trigger C) covers the gap if this fails.
+  try {
+    await assignDailyTasks(bUserId, getISTDateOnly());
+  } catch (err) {
+    logError(`Task assignment on onboarding failed for user ${bUserId}: ${err.message}`);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
