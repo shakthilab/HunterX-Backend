@@ -19,25 +19,41 @@ ALTER TABLE "tasks"
 ALTER TABLE "task_schedule"
   ADD COLUMN "user_id" BIGINT NOT NULL;
 
--- Drop whatever unique constraint currently enforces (task_id, active_date).
+-- Drop whatever currently enforces uniqueness on (task_id, active_date).
 -- Its name may vary depending on how the table was originally created
 -- (db push vs hand-written SQL), so find it by its columns instead of
--- hardcoding a guessed name.
+-- hardcoding a guessed name. Prisma's `@@unique(...)` generates a bare
+-- `CREATE UNIQUE INDEX` (no entry in information_schema.table_constraints
+-- / pg_constraint — that view only covers constraint-backed uniques from
+-- `ADD CONSTRAINT ... UNIQUE`), so this looks at pg_index directly to
+-- catch either form, and drops via ALTER TABLE...DROP CONSTRAINT when
+-- it's constraint-backed (a plain DROP INDEX fails on those) or DROP
+-- INDEX when it's a bare index.
 DO $$
 DECLARE
-  c_name text;
+  idx_relname text;
+  con_name text;
 BEGIN
-  SELECT tc.constraint_name INTO c_name
-  FROM information_schema.table_constraints tc
-  JOIN information_schema.key_column_usage kcu
-    ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-  WHERE tc.table_name = 'task_schedule'
-    AND tc.constraint_type = 'UNIQUE'
-  GROUP BY tc.constraint_name
-  HAVING array_agg(kcu.column_name ORDER BY kcu.column_name) = ARRAY['active_date', 'task_id'];
+  SELECT ic.relname, con.conname
+  INTO idx_relname, con_name
+  FROM pg_index i
+  JOIN pg_class ic ON ic.oid = i.indexrelid
+  JOIN pg_class tc ON tc.oid = i.indrelid
+  JOIN pg_namespace n ON n.oid = tc.relnamespace
+  LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid
+  WHERE tc.relname = 'task_schedule'
+    AND n.nspname = 'public'
+    AND i.indisunique
+    AND (
+      SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+      FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute a ON a.attrelid = tc.oid AND a.attnum = k.attnum
+    ) = ARRAY['active_date', 'task_id'];
 
-  IF c_name IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE "task_schedule" DROP CONSTRAINT %I', c_name);
+  IF con_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE "task_schedule" DROP CONSTRAINT %I', con_name);
+  ELSIF idx_relname IS NOT NULL THEN
+    EXECUTE format('DROP INDEX %I', idx_relname);
   END IF;
 END $$;
 
