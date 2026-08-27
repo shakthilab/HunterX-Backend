@@ -3,6 +3,7 @@
 import prisma from '../config/prisma.js';
 import { getISTDateOnly, getISTWeekStart } from '../utils/helpers.js';
 import { assignDailyTasks } from './taskAssignmentService.js';
+import { bumpDailyStreak, getStreakRiskStatus } from './streakService.js';
 
 const DAILY_TYPES     = ['DAILY_FIXED', 'DAILY_ADMIN'];
 const VALID_STATUSES  = ['COMPLETED', 'PARTIAL', 'SKIPPED'];
@@ -113,6 +114,10 @@ export async function getTodayTasks(userId) {
       target_value:   resolveTarget(task, user),
       target_unit:    task.target_unit,
       is_recurring:   task.is_recurring,
+      // null for DAILY_FIXED (no admin-set window); for DAILY_ADMIN/WEEKLY
+      // this is the task's validity window — see adminTaskService.js
+      start_date:     task.start_date ? dateKey(task.start_date) : null,
+      end_date:       task.end_date ? dateKey(task.end_date) : null,
       // Not a DB value — PENDING just means "no completion row yet"
       status:         completion?.status ?? 'PENDING',
       progress_value: completion?.progress_value ?? null,
@@ -124,6 +129,8 @@ export async function getTodayTasks(userId) {
   const daily  = eligible.filter(t => DAILY_TYPES.includes(t.task_type)).map(serialize);
   const weekly = eligible.filter(t => t.task_type === 'WEEKLY').map(serialize);
 
+  const streak = await getStreakRiskStatus(bUserId);
+
   return {
     date:               dateKey(todayDate),
     week_start:         dateKey(weekStartDate),
@@ -133,6 +140,9 @@ export async function getTodayTasks(userId) {
     daily_xp_possible:  daily.reduce((s, t) => s + t.xp_reward, 0),
     weekly_xp_earned:   weekly.reduce((s, t) => s + t.xp_earned, 0),
     weekly_xp_possible: weekly.reduce((s, t) => s + t.xp_reward, 0),
+    // streak.at_risk true = show the "use a life or let it drop?" prompt;
+    // see POST /api/tasks/streak/resolve
+    streak,
   };
 }
 
@@ -143,6 +153,43 @@ export async function getTodayTasks(userId) {
 // previously held (so flipping COMPLETED -> PARTIAL -> SKIPPED
 // -> COMPLETED never double-counts or under-counts XP).
 // ─────────────────────────────────────────────────────────────
+
+// Authorization gate: a task only being active isn't enough — the caller
+// must actually have it on their list for the current period, i.e. a
+// task_schedule row exists for them (same source of truth GET /today
+// reads from). Without this, any logged-in user could mark XP-earning
+// completions on a task never assigned to them — another user's targeted
+// DAILY_ADMIN task, or one whose date window hasn't opened/has already
+// closed.
+async function assertAssignedToUser(bUserId, task) {
+  if (task.task_type === 'WEEKLY') {
+    const weekStart = getISTWeekStart();
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
+
+    const row = await prisma.task_schedule.findFirst({
+      where: {
+        user_id:     bUserId,
+        task_id:     task.id,
+        active_date: { gte: weekStart, lte: weekEnd },
+      },
+      select: { id: true },
+    });
+    if (!row) throw new Error('TASK_NOT_ASSIGNED');
+  } else {
+    const row = await prisma.task_schedule.findUnique({
+      where: {
+        user_id_task_id_active_date: {
+          user_id:     bUserId,
+          task_id:     task.id,
+          active_date: getISTDateOnly(),
+        },
+      },
+      select: { id: true },
+    });
+    if (!row) throw new Error('TASK_NOT_ASSIGNED');
+  }
+}
 
 export async function setTaskCompletion(userId, taskId, { status, progressValue }) {
   if (!VALID_STATUSES.includes(status)) throw new Error('INVALID_STATUS');
@@ -161,6 +208,8 @@ export async function setTaskCompletion(userId, taskId, { status, progressValue 
   if (!task || !task.is_active) throw new Error('TASK_NOT_FOUND');
 
   if (status === 'PARTIAL' && !task.allows_partial) throw new Error('PARTIAL_NOT_ALLOWED');
+
+  await assertAssignedToUser(bUserId, task);
 
   const periodDate = periodDateFor(task.task_type);
 
@@ -181,6 +230,13 @@ export async function setTaskCompletion(userId, taskId, { status, progressValue 
       },
     });
 
+    // Once COMPLETED, a task is locked — no more status changes for this
+    // period. Resending COMPLETED again is still a no-op success (same
+    // idempotent rule as always); only switching AWAY from it is blocked.
+    if (existing?.status === 'COMPLETED' && status !== 'COMPLETED') {
+      throw new Error('TASK_ALREADY_COMPLETED');
+    }
+
     const upserted = await tx.task_completions.upsert({
       where: {
         user_id_task_id_schedule_date: {
@@ -194,7 +250,7 @@ export async function setTaskCompletion(userId, taskId, { status, progressValue 
         task_id:        bTaskId,
         schedule_date:  periodDate,
         status,
-        progress_value: progressValue ?? null,
+        progress_value: progressValue ?? null, // not sent by the client yet — stored if it ever is
         xp_earned:      xpEarned,
         completed_at:   status === 'SKIPPED' ? null : new Date(),
       },
@@ -225,6 +281,16 @@ export async function setTaskCompletion(userId, taskId, { status, progressValue 
       });
     }
 
+    // Streak is a daily-tasks concept only, and only COMPLETED/PARTIAL
+    // count as "active today" — marking a task SKIPPED must not extend
+    // the streak. (If a task is flipped from COMPLETED to SKIPPED later
+    // the same day, the streak already bumped for that day stays bumped —
+    // the user genuinely was active that day, this just isn't the call
+    // that should be granting it.)
+    if (DAILY_TYPES.includes(task.task_type) && status !== 'SKIPPED') {
+      await bumpDailyStreak(tx, bUserId);
+    }
+
     return upserted;
   });
 
@@ -232,10 +298,61 @@ export async function setTaskCompletion(userId, taskId, { status, progressValue 
 
   return {
     task_id:        task.id,
+    title:          task.title,
+    task_type:      task.task_type,
     status:         completion.status,
     progress_value: completion.progress_value,
+    target_value:   task.target_value,
+    target_unit:    task.target_unit,
+    xp_reward:      task.xp_reward,
+    xp_partial:     task.xp_partial,
     xp_earned:      completion.xp_earned,
     completed_at:   completion.completed_at,
     total_xp:       progression?.total_xp ?? 0,
+    daily_streak:   progression?.daily_streak ?? 0,
+    longest_streak: progression?.longest_streak ?? 0,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// PUT — reopen a task: SKIPPED -> PENDING, the only direction this
+// goes. There's no "PENDING" completion_status to set (PENDING is just
+// the absence of a task_completions row), so reopening deletes the row.
+// COMPLETED is locked (setTaskCompletion already rejects switching away
+// from it), and PARTIAL isn't reopenable through this endpoint either —
+// only a SKIPPED row can be undone. No XP or streak side effects: a
+// SKIPPED row always held xp_earned=0 and never bumped the streak, so
+// there's nothing to reverse.
+// ─────────────────────────────────────────────────────────────
+
+export async function reopenTask(userId, taskId) {
+  const bUserId = BigInt(userId);
+  const bTaskId = BigInt(taskId);
+
+  const task = await prisma.tasks.findUnique({ where: { id: bTaskId } });
+  if (!task || !task.is_active) throw new Error('TASK_NOT_FOUND');
+
+  await assertAssignedToUser(bUserId, task);
+
+  const periodDate = periodDateFor(task.task_type);
+  const where = {
+    user_id_task_id_schedule_date: {
+      user_id:       bUserId,
+      task_id:       bTaskId,
+      schedule_date: periodDate,
+    },
+  };
+
+  const existing = await prisma.task_completions.findUnique({ where });
+  if (!existing) throw new Error('TASK_ALREADY_PENDING'); // nothing to undo
+  if (existing.status !== 'SKIPPED') throw new Error('TASK_NOT_SKIPPED');
+
+  await prisma.task_completions.delete({ where });
+
+  return {
+    task_id:   task.id,
+    title:     task.title,
+    task_type: task.task_type,
+    status:    'PENDING',
   };
 }

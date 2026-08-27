@@ -22,14 +22,14 @@ async function main() {
   const q9Answers = await prisma.user_onboarding_answers.findMany({
     where: { question_id: 9 },
     select: {
-      user_id:    true,
-      answer:     true,
+      user_id: true,
+      answer: true,
       created_at: true,
       users: {
         select: {
-          email:               true,
-          weight_kg:           true,
-          daily_protein_goal:  true,
+          email: true,
+          weight_kg: true,
+          daily_protein_goal: true,
         },
       },
     },

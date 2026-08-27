@@ -23,28 +23,37 @@ export async function assignDailyTasks(userId, date) {
   const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
   const dayOfWeek = date.getUTCDay();
 
-  const [routine, weekly, adminOneOff] = await Promise.all([
+  const [routine, weekly, adminDated] = await Promise.all([
     // 1. Routine daily tasks — same 3 tasks, every user, every day, no exceptions.
     prisma.tasks.findMany({
       where: { is_active: true, is_default_daily: true },
       select: { id: true },
     }),
-    // 2. Weekly tasks recurring on this specific day of week.
+    // 2. Admin-created WEEKLY quests recurring on this day of week, within
+    //    their [start_date, end_date] window — one-time quests have a
+    //    single 7-day window (end_date = start_date + 6), recurring ones
+    //    repeat every week through an admin-set end_date. See
+    //    adminTaskService.js#createTask for how the window is derived.
     prisma.tasks.findMany({
       where: {
         is_active:  true,
         task_type:  'WEEKLY',
         recurrence_days: { has: dayOfWeek },
+        start_date: { lte: date },
+        end_date:   { gte: date },
       },
       select: { id: true },
     }),
-    // 3. Admin one-off tasks scheduled for this exact date, optionally
-    //    targeting only a subset of users (no targets rows = all users).
+    // 3. Admin-created DAILY_ADMIN tasks whose window covers this date —
+    //    one-time tasks have start_date === end_date (a single day),
+    //    recurring ones span through an admin-set end_date. Optionally
+    //    targets only a subset of users (no targets rows = all users).
     prisma.tasks.findMany({
       where: {
-        is_active:      true,
-        task_type:      'DAILY_ADMIN',
-        scheduled_date: date,
+        is_active:  true,
+        task_type:  'DAILY_ADMIN',
+        start_date: { lte: date },
+        end_date:   { gte: date },
       },
       select: {
         id: true,
@@ -53,7 +62,7 @@ export async function assignDailyTasks(userId, date) {
     }),
   ]);
 
-  const eligibleAdminIds = adminOneOff
+  const eligibleAdminIds = adminDated
     .filter(t => t.task_admin_targets.length === 0 || t.task_admin_targets.some(x => x.user_id === bUserId))
     .map(t => t.id);
 

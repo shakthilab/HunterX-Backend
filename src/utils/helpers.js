@@ -58,6 +58,19 @@ export function getISTDateOnly(offsetDays = 0) {
   return new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()));
 }
 
+// Parse a "YYYY-MM-DD" string into a UTC-midnight Date — same convention
+// @db.Date columns expect, matching getISTDateOnly()/getISTWeekStart().
+// Returns null for anything malformed or an impossible calendar date
+// (e.g. "2026-02-30", which Date.UTC would otherwise silently roll over).
+export function parseDateOnly(str) {
+  if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d)
+    return null;
+  return date;
+}
+
 // Monday of the current IST week, as a UTC-midnight Date — used as the
 // schedule_date "period key" for WEEKLY tasks so a weekly quest has one
 // completion row per week instead of one per day.
