@@ -478,6 +478,7 @@ model users {
   referred_by                                             BigInt?
   gender                                                  user_gender?
   date_of_birth                                           DateTime?                  @db.Date
+  age                                                     Int?
   height_cm                                               Float?
   weight_kg                                               Float?
   bmi                                                     Float?

@@ -16,8 +16,52 @@ import { assignDailyTasks } from '../services/taskAssignmentService.js';
 import { getISTDateOnly } from '../utils/helpers.js';
 import { info, logError } from '../utils/logger.js';
 
+export async function syncUserAgesForBirthdays(today) {
+  const usersWithDob = await prisma.users.findMany({
+    where: {
+      date_of_birth: { not: null },
+    },
+    select: {
+      id: true,
+      date_of_birth: true,
+      age: true,
+    },
+  });
+
+  let updatedCount = 0;
+
+  for (const user of usersWithDob) {
+    try {
+      const dob = user.date_of_birth;
+      let calculatedAge = today.getUTCFullYear() - dob.getUTCFullYear();
+      const monthDiff = today.getUTCMonth() - dob.getUTCMonth();
+      const dayDiff = today.getUTCDate() - dob.getUTCDate();
+      if (monthDiff < 0 || (monthDiff === 0 && dayDiff < 0)) {
+        calculatedAge--;
+      }
+
+      if (user.age !== calculatedAge) {
+        await prisma.users.update({
+          where: { id: user.id },
+          data: { age: calculatedAge },
+        });
+        updatedCount++;
+      }
+    } catch (err) {
+      logError(`Failed to update age for user ${user.id}: ${err.message}`);
+    }
+  }
+
+  if (updatedCount > 0) {
+    info(`Daily birthday age sync completed: updated ${updatedCount} user(s)`);
+  }
+}
+
 export async function runNightlyTaskAssignment() {
   const today = getISTDateOnly();
+
+  // Run daily birthday sync first
+  await syncUserAgesForBirthdays(today);
 
   const users = await prisma.users.findMany({
     where:  { onboarding_done: true, is_banned: false },

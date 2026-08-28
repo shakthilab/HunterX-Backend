@@ -122,13 +122,11 @@ async function processOnboarding(userId, answers) {
         break;
 
       case 3:
-        // Temporal Age — convert age number to date_of_birth
+        // Temporal Age — store age directly in userUpdates, keep date_of_birth as null
         // answer is age as string e.g. "24"
         const age = parseInt(a.answer);
         if (!isNaN(age) && age >= 8 && age <= 80) {
-          const dob = new Date();
-          dob.setFullYear(dob.getFullYear() - age);
-          userUpdates.date_of_birth = dob;
+          userUpdates.age = age;
         }
         break;
 
@@ -899,6 +897,7 @@ export async function getCurrentUser(userId) {
       referred_by:                   true,
       gender:                        true,
       date_of_birth:                 true,
+      age:                           true,
       height_cm:                     true,
       weight_kg:                     true,
       bmi:                           true,
