@@ -912,6 +912,11 @@ export async function getCurrentUser(userId) {
       created_at:                    true,
       updated_at:                    true,
       user_progression:              true,
+      auth_providers: {
+        select: {
+          provider: true,
+        },
+      },
     },
   });
 }
