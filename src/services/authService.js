@@ -30,11 +30,16 @@ const GOOGLE_AUDIENCES = [
 
 const googleClient = new OAuth2Client();
 const mailTransporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // true for 465, false for other ports (uses STARTTLS)
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_PASS,
   },
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 10000,
 });
 
 // Removes sensitive fields before sending user to client
@@ -302,8 +307,8 @@ export async function sendOtp(email) {
     },
   });
 
-  // Step 5 — Send OTP email via Gmail SMTP (Nodemailer)
-  await mailTransporter.sendMail({
+  // Step 5 — Send OTP email via Gmail SMTP (Nodemailer) (Asynchronous)
+  mailTransporter.sendMail({
     from:    process.env.EMAIL_FROM || process.env.GMAIL_USER,
     to:      email,
     subject: 'Your HunterX verification code',
@@ -430,6 +435,8 @@ export async function sendOtp(email) {
       </body>
       </html>
     `,
+  }).catch((err) => {
+    logError(`Failed to send OTP email to ${email}: ${err.message || err}`);
   });
 
   return true;
