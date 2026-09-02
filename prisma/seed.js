@@ -141,6 +141,28 @@ const BADGES = [
     image_url:   null,
     badge_type:  'ACHIEVEMENT',
   },
+  // These three back the BADGE-type streak_milestones below — names must
+  // match STREAK_MILESTONES[].description exactly, since that's how
+  // rewardService.grantStreakMilestoneReward looks them up (no FK from
+  // streak_milestones to badges in the schema).
+  {
+    name:        'PLACEHOLDER_Exclusive badge',
+    description: 'PLACEHOLDER 30-day streak badge.',
+    image_url:   null,
+    badge_type:  'STREAK',
+  },
+  {
+    name:        'PLACEHOLDER_Legendary reward',
+    description: 'PLACEHOLDER 60-day streak badge.',
+    image_url:   null,
+    badge_type:  'STREAK',
+  },
+  {
+    name:        'PLACEHOLDER_Shadow rank badge',
+    description: 'PLACEHOLDER 90-day streak badge.',
+    image_url:   null,
+    badge_type:  'STREAK',
+  },
 ];
 
 async function seedBadges() {
@@ -155,18 +177,59 @@ async function seedBadges() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ⚠ PLACEHOLDER — replace with the real per-level XP curve.
+// Per-level XP curve — flat 30 XP/day (3 routine tasks x 10 XP each, no
+// streak or fitness-level multiplier — see taskService.js). Anchors:
+//   Level 1:   0 XP
+//   Level 10:  10,950 XP  (~1 year of consistent daily tasks)
+//   Level 40:  21,900 XP  (~2 years)
+//   Level 100: 32,850 XP  (~3 years)
+// Three segments interpolate between anchors with an easing exponent —
+// steeper early (fast first levels), flatter late (the long endgame
+// grind) — rather than a single curve across all 100 levels.
 // ─────────────────────────────────────────────────────────────
 
-const LEVELS = [
-  {
-    level_number:   1,
-    xp_required:    0,
-    title:          'PLACEHOLDER_Rookie',
-    rank_name:      'PLACEHOLDER_E-Rank',
-    unlock_message: 'PLACEHOLDER unlock message for level 1.',
-  },
+function levelXpRequired(level) {
+  const anchors = { 1: 0, 10: 10950, 40: 21900, 100: 32850 };
+  const segments = [
+    { lo: 1, hi: 10, loXp: 0, hiXp: anchors[10], exp: 2.6 },
+    { lo: 10, hi: 40, loXp: anchors[10], hiXp: anchors[40], exp: 1.6 },
+    { lo: 40, hi: 100, loXp: anchors[40], hiXp: anchors[100], exp: 1.5 },
+  ];
+  if (level === 1) return 0;
+  const seg = segments.find(s => level > s.lo && level <= s.hi);
+  const x = (level - seg.lo) / (seg.hi - seg.lo);
+  return Math.round(seg.loXp + (seg.hiXp - seg.loXp) * Math.pow(x, seg.exp));
+}
+
+// ⚠ PLACEHOLDER — title/unlock_message copy, and the specific 10 rank
+// names (xp_required itself is the real formula above, not a
+// placeholder). rank_name buckets every 10 levels into one rank, the
+// same boundary width dragon_stages uses for its stages — PLACEHOLDER_
+// prefixed the same way DRAGON_STAGES/BADGES are until real game-design
+// copy replaces it.
+const RANK_NAMES = [
+  'PLACEHOLDER_E-Rank', 'PLACEHOLDER_D-Rank', 'PLACEHOLDER_C-Rank',
+  'PLACEHOLDER_B-Rank', 'PLACEHOLDER_A-Rank', 'PLACEHOLDER_S-Rank',
+  'PLACEHOLDER_SS-Rank', 'PLACEHOLDER_SSS-Rank', 'PLACEHOLDER_National-Level',
+  'PLACEHOLDER_Shadow-Rank',
 ];
+
+function buildLevels() {
+  const levels = [];
+  for (let level = 1; level <= 100; level++) {
+    const rankIndex = Math.min(Math.floor((level - 1) / 10), RANK_NAMES.length - 1);
+    levels.push({
+      level_number:   level,
+      xp_required:    levelXpRequired(level),
+      title:          `PLACEHOLDER_Level_${level}`,
+      rank_name:      RANK_NAMES[rankIndex],
+      unlock_message: `PLACEHOLDER unlock message for level ${level}.`,
+    });
+  }
+  return levels;
+}
+
+const LEVELS = buildLevels();
 
 async function seedLevels() {
   for (const level of LEVELS) {
@@ -175,21 +238,28 @@ async function seedLevels() {
       create: level,
       update: level,
     });
-    console.log(`UPSERTED levels level_number=${level.level_number}`);
   }
+  console.log(`UPSERTED levels level_number=1-${LEVELS.length}`);
 }
 
 // ─────────────────────────────────────────────────────────────
-// ⚠ PLACEHOLDER — replace with the real streak-milestone rewards.
+// ⚠ PLACEHOLDER — reward copy (description). xp_bonus is deliberately 0
+// on every row and left unread by rewardService — streak milestones are
+// a physical/cosmetic reward track only, fully decoupled from XP (XP
+// only ever comes from task completion; see LEVELS above). reward_type
+// maps each milestone onto the two grant mechanisms rewardService.js
+// knows how to fulfill: COUPON claims a reward_pool code via
+// user_rewards, BADGE awards a user_badges row (matched by name against
+// BADGES above — see grantBadge in rewardService.js).
 // ─────────────────────────────────────────────────────────────
 
 const STREAK_MILESTONES = [
-  {
-    streak_days: 7,
-    reward_type: 'XP_BONUS',
-    xp_bonus:    50,
-    description: 'PLACEHOLDER 7-day streak reward.',
-  },
+  { streak_days: 7,  reward_type: 'COUPON', xp_bonus: 0, description: 'PLACEHOLDER_Scratch card' },
+  { streak_days: 14, reward_type: 'COUPON', xp_bonus: 0, description: 'PLACEHOLDER_Coupon' },
+  { streak_days: 21, reward_type: 'COUPON', xp_bonus: 0, description: 'PLACEHOLDER_Partner coupon' },
+  { streak_days: 30, reward_type: 'BADGE',  xp_bonus: 0, description: 'PLACEHOLDER_Exclusive badge' },
+  { streak_days: 60, reward_type: 'BADGE',  xp_bonus: 0, description: 'PLACEHOLDER_Legendary reward' },
+  { streak_days: 90, reward_type: 'BADGE',  xp_bonus: 0, description: 'PLACEHOLDER_Shadow rank badge' },
 ];
 
 async function seedStreakMilestones() {

@@ -38,6 +38,7 @@
 
 import prisma from '../config/prisma.js';
 import { getISTDateOnly } from '../utils/helpers.js';
+import { grantStreakMilestoneReward } from './rewardService.js';
 
 const MS_PER_DAY   = 24 * 60 * 60 * 1000;
 const MAX_LIVES     = 2;
@@ -99,6 +100,16 @@ export async function bumpDailyStreak(tx, userId) {
       streak_lives:          newLives,
     },
   });
+
+  // Milestone rewards are physical/cosmetic only (scratch card, coupon,
+  // badge, ...) — no XP involved, see rewardService.js. Keyed off the
+  // absolute streak_days reached, so a milestone is granted at most once
+  // per user ever (user_streak_milestones' unique constraint), even if
+  // the streak later resets and climbs back through the same count.
+  const milestone = await tx.streak_milestones.findUnique({ where: { streak_days: newStreak } });
+  if (milestone) {
+    await grantStreakMilestoneReward(tx, userId, milestone);
+  }
 }
 
 // Read-only — surfaced in GET /api/tasks/today so the client can decide

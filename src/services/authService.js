@@ -8,6 +8,7 @@ import nodemailer        from 'nodemailer';
 import prisma            from '../config/prisma.js';
 import { logError }      from '../utils/logger.js';
 import { assignDailyTasks } from './taskAssignmentService.js';
+import { getWeekStatus }    from './taskService.js';
 import { getISTDateOnly }   from '../utils/helpers.js';
 import {
   generateHunterId,
@@ -243,6 +244,57 @@ async function processOnboarding(userId, answers) {
   } catch (err) {
     logError(`Task assignment on onboarding failed for user ${bUserId}: ${err.message}`);
   }
+
+  // Referral payout — the referrer gets 50 XP once (and only once) the
+  // referred user finishes onboarding, not at signup. This is the same
+  // funnel point as the task-assignment trigger above, so it fires no
+  // matter which auth path (register/Google/Apple/completeOnboarding)
+  // got them here. xp_awarded on the referrals row makes this idempotent.
+  try {
+    await awardReferralXpIfEligible(bUserId);
+  } catch (err) {
+    logError(`Referral XP payout failed for referred user ${bUserId}: ${err.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// INTERNAL — awardReferralXpIfEligible
+// Pays the REFERRER 50 XP the moment the user they referred
+// completes onboarding. No-op if this user wasn't referred, or
+// the referral already got its XP.
+// ─────────────────────────────────────────────────────────────
+
+const REFERRAL_XP_REWARD = 50;
+
+async function awardReferralXpIfEligible(referredUserId) {
+  const referral = await prisma.referrals.findFirst({
+    where: { referred_id: referredUserId, xp_awarded: false },
+  });
+  if (!referral) return;
+
+  await prisma.$transaction(async (tx) => {
+    // Re-check inside the transaction so two concurrent onboarding
+    // completions for the same user can't double-pay the referrer.
+    const { count } = await tx.referrals.updateMany({
+      where: { id: referral.id, xp_awarded: false },
+      data:  { xp_awarded: true },
+    });
+    if (count === 0) return;
+
+    await tx.xp_transactions.create({
+      data: {
+        user_id: referral.referrer_id,
+        amount:  REFERRAL_XP_REWARD,
+        reason:  'REFERRAL: invited friend completed onboarding',
+      },
+    });
+
+    await tx.user_progression.upsert({
+      where:  { user_id: referral.referrer_id },
+      create: { user_id: referral.referrer_id, total_xp: REFERRAL_XP_REWARD },
+      update: { total_xp: { increment: REFERRAL_XP_REWARD } },
+    });
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -251,7 +303,17 @@ async function processOnboarding(userId, answers) {
 // Used by all three auth methods
 // ─────────────────────────────────────────────────────────────
 
-async function createBaseUser({ name, email, provider, providerId, passwordHash }) {
+async function createBaseUser({ name, email, provider, providerId, passwordHash, referralCode }) {
+  // Resolve the inviter's referral code, if one was passed in. A
+  // missing/invalid/unknown code is never fatal to signup — it just
+  // means this account isn't attributed to anyone.
+  let referrer = null;
+  if (referralCode) {
+    referrer = await prisma.users.findUnique({
+      where: { referral_code: referralCode.trim().toUpperCase() },
+    });
+  }
+
   const user = await prisma.users.create({
     data: {
       hunter_id:     await generateHunterId(),
@@ -259,6 +321,7 @@ async function createBaseUser({ name, email, provider, providerId, passwordHash 
       email:         email || null,
       password_hash: passwordHash || null,
       referral_code: generateReferralCode(),
+      referred_by:   referrer?.id || null,
       role:          'USER',
     },
   });
@@ -274,6 +337,19 @@ async function createBaseUser({ name, email, provider, providerId, passwordHash 
   await prisma.user_progression.create({
     data: { user_id: user.id },
   });
+
+  // Record the referral. XP for the referrer is paid out later, once
+  // this new user actually completes onboarding (see processOnboarding)
+  // — not here — so a code can't be farmed for XP with throwaway
+  // accounts that never activate.
+  if (referrer) {
+    await prisma.referrals.create({
+      data: {
+        referrer_id: referrer.id,
+        referred_id: user.id,
+      },
+    });
+  }
 
   return user;
 }
@@ -305,12 +381,13 @@ export async function sendOtp(email) {
     },
   });
 
-  // Step 5 — Send OTP email via Gmail SMTP (Nodemailer) (Asynchronous)
-  mailTransporter.sendMail({
-    from:    process.env.EMAIL_FROM || process.env.GMAIL_USER,
-    to:      email,
-    subject: 'Your HunterX verification code',
-    html: `
+  // Step 5 — Send OTP email via Gmail SMTP (Nodemailer)
+  try {
+    await mailTransporter.sendMail({
+      from:    process.env.EMAIL_FROM || process.env.GMAIL_USER,
+      to:      email,
+      subject: 'Your HunterX verification code',
+      html: `
       <!DOCTYPE html>
       <html>
       <head>
@@ -433,9 +510,11 @@ export async function sendOtp(email) {
       </body>
       </html>
     `,
-  }).catch((err) => {
+    });
+  } catch (err) {
     logError(`Failed to send OTP email to ${email}: ${err.message || err}`);
-  });
+    throw new Error('Failed to send verification email. Please try again.');
+  }
 
   return true;
 }
@@ -475,7 +554,7 @@ export async function verifyOtp(email, otp) {
 // REGISTER WITH EMAIL AND PASSWORD
 // ─────────────────────────────────────────────────────────────
 
-export async function registerWithEmail(name, email, password, onboarding = []) {
+export async function registerWithEmail(name, email, password, onboarding = [], referralCode = null) {
   // Check OTP was verified for this email before allowing registration
   const otpRecord = await prisma.email_otps.findFirst({
     where: {
@@ -503,6 +582,7 @@ export async function registerWithEmail(name, email, password, onboarding = []) 
     provider:     'EMAIL',
     providerId:   email,
     passwordHash,
+    referralCode,
   });
 
   // Save onboarding answers and calculate profile fields
@@ -554,7 +634,7 @@ export async function loginWithEmail(email, password) {
 // Existing users — log in, skip onboarding
 // ─────────────────────────────────────────────────────────────
 
-export async function loginWithGoogle(idToken, onboarding = []) {
+export async function loginWithGoogle(idToken, onboarding = [], referralCode = null) {
   if (GOOGLE_AUDIENCES.length === 0) throw new Error('GOOGLE_NOT_CONFIGURED');
 
   // Verify Google token — throws for expired/malformed/wrong-audience tokens
@@ -615,6 +695,7 @@ export async function loginWithGoogle(idToken, onboarding = []) {
     email,
     provider:   'GOOGLE',
     providerId: googleId,
+    referralCode,
   });
 
   await processOnboarding(user.id, onboarding);
@@ -631,7 +712,7 @@ export async function loginWithGoogle(idToken, onboarding = []) {
 // Name comes from onboarding Q1 answer — more reliable
 // ─────────────────────────────────────────────────────────────
 
-export async function loginWithApple(idToken, nonce, onboarding = []) {
+export async function loginWithApple(idToken, nonce, onboarding = [], referralCode = null) {
   // Verify Apple token
   const appleUser = await appleSignin.verifyIdToken(idToken, {
     audience:         process.env.APPLE_CLIENT_ID,
@@ -685,6 +766,7 @@ export async function loginWithApple(idToken, nonce, onboarding = []) {
     email,
     provider:   'APPLE',
     providerId: appleId,
+    referralCode,
   });
 
   await processOnboarding(user.id, onboarding);
@@ -881,7 +963,7 @@ export async function completeOnboarding(userId, onboarding = []) {
 
 export async function getCurrentUser(userId) {
   const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
-  return prisma.users.findUnique({
+  const user = await prisma.users.findUnique({
     where: { id: bUserId },
     select: {
       id:                            true,
@@ -919,4 +1001,12 @@ export async function getCurrentUser(userId) {
       },
     },
   });
+
+  if (!user) return null;
+
+  const { auth_providers, ...flatUser } = user;
+  flatUser.auth_provider = auth_providers?.[0]?.provider || null;
+  flatUser.week_status   = await getWeekStatus(bUserId);
+
+  return flatUser;
 }

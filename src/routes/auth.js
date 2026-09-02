@@ -72,11 +72,11 @@ router.post('/verify-otp', authLimiter, async (req, res, next) => {
 // ── POST /api/auth/register ───────────────────────────────
 // Creates account with email + password
 // Saves all onboarding answers in same call
-// Body: { name, email, password, onboarding[] }
+// Body: { name, email, password, onboarding[], referral_code? }
 
 router.post('/register', authLimiter, async (req, res, next) => {
   try {
-    const { name, email, password, onboarding = [] } = req.body;
+    const { name, email, password, onboarding = [], referral_code } = req.body;
 
     // Validate required fields
     if (!name?.trim())
@@ -103,7 +103,7 @@ router.post('/register', authLimiter, async (req, res, next) => {
     }
 
     const result = await authService.registerWithEmail(
-      name, email, password, onboarding
+      name, email, password, onboarding, referral_code
     );
 
     return success(res, {
@@ -158,11 +158,11 @@ router.post('/login', authLimiter, async (req, res, next) => {
 // ── POST /api/auth/google ─────────────────────────────────
 // New users — creates account + saves onboarding in one call
 // Existing users — logs in, ignores onboarding array
-// Body: { idToken, onboarding[] }
+// Body: { idToken, onboarding[], referral_code? }
 
 router.post('/google', authLimiter, async (req, res, next) => {
   try {
-    const { idToken, onboarding = [] } = req.body;
+    const { idToken, onboarding = [], referral_code } = req.body;
 
     if (!idToken)
       return error(res, 'Google ID token is required', 400);
@@ -176,7 +176,7 @@ router.post('/google', authLimiter, async (req, res, next) => {
       }
     }
 
-    const result = await authService.loginWithGoogle(idToken, onboarding);
+    const result = await authService.loginWithGoogle(idToken, onboarding, referral_code);
 
     return success(res, {
       user:          result.user,
@@ -200,11 +200,11 @@ router.post('/google', authLimiter, async (req, res, next) => {
 // ── POST /api/auth/apple ──────────────────────────────────
 // New users — creates account + saves onboarding in one call
 // Existing users — logs in, ignores onboarding array
-// Body: { idToken, nonce?, onboarding[] }
+// Body: { idToken, nonce?, onboarding[], referral_code? }
 
 router.post('/apple', authLimiter, async (req, res, next) => {
   try {
-    const { idToken, nonce, onboarding = [] } = req.body;
+    const { idToken, nonce, onboarding = [], referral_code } = req.body;
 
     if (!idToken)
       return error(res, 'Apple ID token is required', 400);
@@ -218,7 +218,7 @@ router.post('/apple', authLimiter, async (req, res, next) => {
       }
     }
 
-    const result = await authService.loginWithApple(idToken, nonce, onboarding);
+    const result = await authService.loginWithApple(idToken, nonce, onboarding, referral_code);
 
     return success(res, {
       user:          result.user,

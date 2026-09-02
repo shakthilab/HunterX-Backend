@@ -4,6 +4,7 @@ import prisma from '../config/prisma.js';
 import { getISTDateOnly, getISTWeekStart } from '../utils/helpers.js';
 import { assignDailyTasks } from './taskAssignmentService.js';
 import { bumpDailyStreak, getStreakRiskStatus } from './streakService.js';
+import { checkLevelUp } from './xpService.js';
 
 const DAILY_TYPES     = ['DAILY_FIXED', 'DAILY_ADMIN'];
 const VALID_STATUSES  = ['COMPLETED', 'PARTIAL', 'SKIPPED'];
@@ -147,6 +148,56 @@ export async function getTodayTasks(userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// GET — Mon–Sun status strip for the current IST week, e.g. for a
+// streak-calendar UI. Always keyed off getISTWeekStart()/getISTDateOnly()
+// live, so it needs no reset job — it's just a different week's Monday
+// once the calendar rolls over.
+// "Done" mirrors the streak's own definition of an active day
+// (bumpDailyStreak): a DAILY_FIXED/DAILY_ADMIN completion with status
+// COMPLETED or PARTIAL. WEEKLY quests aren't day-keyed so they don't
+// factor in here.
+// ─────────────────────────────────────────────────────────────
+
+const WEEK_DAY_NAMES = [
+  'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY',
+];
+
+export async function getWeekStatus(userId) {
+  const bUserId = BigInt(userId);
+
+  const weekStart = getISTWeekStart();
+  const weekEnd    = new Date(weekStart);
+  weekEnd.setUTCDate(weekEnd.getUTCDate() + 6); // Sunday of this ISO week
+  const today = getISTDateOnly();
+
+  const completions = await prisma.task_completions.findMany({
+    where: {
+      user_id:       bUserId,
+      schedule_date: { gte: weekStart, lte: weekEnd },
+      status:        { in: ['COMPLETED', 'PARTIAL'] },
+      tasks:         { task_type: { in: DAILY_TYPES } },
+    },
+    select: { schedule_date: true },
+  });
+  const doneDates = new Set(completions.map(c => dateKey(c.schedule_date)));
+
+  const days = WEEK_DAY_NAMES.map((day, i) => {
+    const date = new Date(weekStart);
+    date.setUTCDate(date.getUTCDate() + i);
+    const key = dateKey(date);
+
+    const status = doneDates.has(key)          ? 'DONE'
+                 : date.getTime() === today.getTime() ? 'CURRENT'
+                 : date.getTime() < today.getTime()    ? 'MISSED'
+                 :                                        'NOT_STARTED';
+
+    return { date: key, day, status };
+  });
+
+  return { week_start: dateKey(weekStart), week_end: dateKey(weekEnd), days };
+}
+
+// ─────────────────────────────────────────────────────────────
 // PUT — set this task's completion status for the current period
 // Idempotent: same (status, progress_value) always ends in the
 // same state; XP is adjusted by the delta from whatever the row
@@ -279,6 +330,15 @@ export async function setTaskCompletion(userId, taskId, { status, progressValue 
         create: { user_id: bUserId, total_xp: Math.max(delta, 0) },
         update: { total_xp: { increment: delta } },
       });
+
+      // Level-ups only ever move forward — a status flip that lowers XP
+      // (COMPLETED -> PARTIAL) never un-levels a user, so this only runs
+      // on a net gain. Leveling and streaks are independent systems:
+      // this never touches any streak field, same as bumpDailyStreak
+      // below never touches XP/level.
+      if (delta > 0) {
+        await checkLevelUp(tx, bUserId);
+      }
     }
 
     // Streak is a daily-tasks concept only, and only COMPLETED/PARTIAL
