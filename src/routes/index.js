@@ -2,6 +2,8 @@
 
 import { Router } from 'express';
 import authRouter from './auth.js';
+import usersRouter from './users.js';
+import avatarsRouter from './avatars.js';
 import tasksRouter from './tasks.js';
 import adminRouter from './admin.js';
 import mediaRouter from './media.js';
@@ -21,6 +23,12 @@ router.get('/health', (req, res) => {
 // Auth and onboarding
 router.use('/auth', authRouter);
 
+// User profiles
+router.use('/users', usersRouter);
+
+// Avatars catalog
+router.use('/avatars', avatarsRouter);
+
 // Daily & weekly tasks
 router.use('/tasks', tasksRouter);
 
@@ -30,11 +38,6 @@ router.use('/admin', adminRouter);
 // Signed Cloudinary uploads
 router.use('/media', mediaRouter);
 
-// Coming soon — uncomment as each is built
-// router.use('/users',         usersRouter);
-// router.use('/xp',            xpRouter);
-// router.use('/rewards',       rewardsRouter);
-// router.use('/leaderboard',   leaderboardRouter);
-// router.use('/notifications', notificationsRouter);
-
 export default router;
+
+

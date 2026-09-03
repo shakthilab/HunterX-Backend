@@ -154,4 +154,20 @@ router.post('/streak/resolve', verifyToken, async (req, res, next) => {
   }
 });
 
+// ── GET /api/tasks/activity ───────────────────────────────
+// Activity metrics + paginated quest logs
+router.get('/activity', verifyToken, async (req, res, next) => {
+  try {
+    const page = req.query.page || 1;
+    const limit = req.query.limit || 10;
+    const data = await taskService.getUserActivity(req.user.id, page, limit);
+    return success(res, data, 'Activity fetched successfully');
+  } catch (err) {
+    if (err.message === 'USER_NOT_FOUND')
+      return error(res, 'User not found', 404);
+    next(err);
+  }
+});
+
 export default router;
+

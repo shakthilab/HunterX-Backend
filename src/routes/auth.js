@@ -387,4 +387,65 @@ router.get('/me', verifyToken, async (req, res, next) => {
   }
 });
 
+// ── PATCH/PUT /api/auth/profile ───────────────────────────
+// Edit profile: name, gender, birthday/date_of_birth, height, weight, avatar_id.
+// Automatically calculates BMI and daily_protein_goal.
+// Header: Authorization: Bearer <access_token>
+// Body: { name?, gender?, birthday?, height?, weight?, avatar_id? }
+
+const handleUpdateProfile = async (req, res, next) => {
+  try {
+    const user = await authService.updateUserProfile(req.user.id, req.body);
+    return success(res, { user }, 'Profile updated successfully');
+  } catch (err) {
+    if (err.message === 'USER_NOT_FOUND')
+      return error(res, 'User not found', 404);
+    if (err.message === 'INVALID_NAME')
+      return error(res, 'Name cannot be empty', 400);
+    if (err.message === 'NAME_TOO_LONG')
+      return error(res, 'Name cannot exceed 100 characters', 400);
+    if (err.message === 'INVALID_GENDER')
+      return error(res, 'Gender must be one of: MALE, FEMALE, OTHER, PREFER_NOT_TO_SAY', 400);
+    if (err.message === 'INVALID_BIRTHDAY' || err.message === 'INVALID_AGE')
+      return error(res, 'Invalid birthday format or date', 400);
+    if (err.message === 'BIRTHDAY_IN_FUTURE')
+      return error(res, 'Birthday cannot be in the future', 400);
+    if (err.message === 'INVALID_HEIGHT')
+      return error(res, 'Height must be a valid number in cm (50-300)', 400);
+    if (err.message === 'INVALID_WEIGHT')
+      return error(res, 'Weight must be a valid number in kg (20-500)', 400);
+    if (err.message === 'INVALID_AVATAR')
+      return error(res, 'Invalid avatar ID', 400);
+    if (err.message === 'INVALID_EMAIL')
+      return error(res, 'Invalid email format', 400);
+    if (err.message === 'EMAIL_EXISTS')
+      return error(res, 'An account with this email already exists', 409);
+    next(err);
+  }
+};
+
+router.patch('/profile', verifyToken, handleUpdateProfile);
+router.put('/profile', verifyToken, handleUpdateProfile);
+
+// ── PATCH /api/auth/email ─────────────────────────────────
+router.patch('/email', verifyToken, async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    const user = await authService.updateUserEmail(req.user.id, email);
+    return success(res, { user }, 'Email updated successfully');
+  } catch (err) {
+    if (err.message === 'USER_NOT_FOUND')
+      return error(res, 'User not found', 404);
+    if (err.message === 'EMAIL_REQUIRED')
+      return error(res, 'Email is required', 400);
+    if (err.message === 'INVALID_EMAIL')
+      return error(res, 'Invalid email format', 400);
+    if (err.message === 'EMAIL_EXISTS')
+      return error(res, 'An account with this email already exists', 409);
+    next(err);
+  }
+});
+
 export default router;
+
+

@@ -17,6 +17,7 @@ import {
   generateTokens,
   calculateBMI,
   calculateProtein,
+  isValidEmail,
 } from '../utils/helpers.js';
 
 // Expo/React Native apps get Google ID tokens issued for different
@@ -114,12 +115,28 @@ async function processOnboarding(userId, answers) {
       case 2:
         // Genetic Profile — stored in users.gender
         // answer values: male / female / other
+        const rawGender = String(a.answer).toLowerCase();
         const genderMap = {
           male:   'MALE',
           female: 'FEMALE',
           other:  'OTHER',
         };
-        userUpdates.gender = genderMap[String(a.answer).toLowerCase()] || 'OTHER';
+        userUpdates.gender = genderMap[rawGender] || 'OTHER';
+
+        // Q2 Gender-based default avatar assignment (Zane for male, Talon for female)
+        const targetGender = rawGender === 'female' ? 'female' : 'male';
+        const defaultAvatar = await prisma.avatars.findFirst({
+          where: {
+            gender: targetGender,
+            is_default: true,
+            is_active: true,
+          },
+          select: { id: true },
+        });
+
+        if (defaultAvatar) {
+          userUpdates.avatar_id = defaultAvatar.id;
+        }
         break;
 
       case 3:
@@ -1010,3 +1027,311 @@ export async function getCurrentUser(userId) {
 
   return flatUser;
 }
+
+// ── Update User Profile ──────────────────────────────────────
+// Updates editable profile fields: name, gender, birthday/date_of_birth,
+// height_cm, weight_kg, avatar_id.
+// Automatically recalculates BMI if height or weight changes, and
+// recalculates daily_protein_goal using saved onboarding activity preference
+// whenever weight changes. Manual setting of protein is strictly disallowed.
+export async function updateUserProfile(userId, payload = {}) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  const currentUser = await prisma.users.findUnique({
+    where: { id: bUserId },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      gender: true,
+      date_of_birth: true,
+      age: true,
+      height_cm: true,
+      weight_kg: true,
+      bmi: true,
+      daily_protein_goal: true,
+      avatar_id: true,
+    },
+  });
+
+  if (!currentUser) {
+    throw new Error('USER_NOT_FOUND');
+  }
+
+  const userUpdates = {};
+  const { name, email, gender, birthday, date_of_birth, height, height_cm, weight, weight_kg, avatar_id } = payload;
+
+  // 0. Email
+  if (email !== undefined && email !== null) {
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!isValidEmail(normalizedEmail)) {
+      throw new Error('INVALID_EMAIL');
+    }
+    if (currentUser.email !== normalizedEmail) {
+      const existingUser = await prisma.users.findFirst({
+        where: {
+          email: normalizedEmail,
+          id: { not: bUserId },
+        },
+      });
+      if (existingUser) {
+        throw new Error('EMAIL_EXISTS');
+      }
+      userUpdates.email = normalizedEmail;
+    }
+  }
+
+  // 1. Name
+  if (name !== undefined && name !== null) {
+    const trimmed = String(name).trim();
+    if (!trimmed) {
+      throw new Error('INVALID_NAME');
+    }
+    if (trimmed.length > 100) {
+      throw new Error('NAME_TOO_LONG');
+    }
+    userUpdates.name = trimmed;
+  }
+
+  // 2. Gender
+  if (gender !== undefined && gender !== null) {
+    const g = String(gender).toUpperCase();
+    const validGenders = ['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'];
+    if (!validGenders.includes(g)) {
+      throw new Error('INVALID_GENDER');
+    }
+    userUpdates.gender = g;
+  }
+
+  // 3. Birthday / Date of birth
+  const dobInput = birthday !== undefined ? birthday : date_of_birth;
+  if (dobInput !== undefined && dobInput !== null) {
+    let dob = null;
+    if (typeof dobInput === 'string') {
+      const str = dobInput.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        const [y, m, d] = str.split('-').map(Number);
+        dob = new Date(Date.UTC(y, m - 1, d));
+      } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+        const [d, m, y] = str.split('/').map(Number);
+        dob = new Date(Date.UTC(y, m - 1, d));
+      } else if (/^\d{2}\/\d{2}\/\d{2}$/.test(str)) {
+        const [d, m, y] = str.split('/').map(Number);
+        const fullYear = y >= 50 ? 1900 + y : 2000 + y;
+        dob = new Date(Date.UTC(fullYear, m - 1, d));
+      } else {
+        dob = new Date(str);
+      }
+    } else if (dobInput instanceof Date) {
+      dob = dobInput;
+    }
+
+    if (!dob || isNaN(dob.getTime())) {
+      throw new Error('INVALID_BIRTHDAY');
+    }
+
+    const today = new Date();
+    if (dob > today) {
+      throw new Error('BIRTHDAY_IN_FUTURE');
+    }
+
+    let age = today.getUTCFullYear() - dob.getUTCFullYear();
+    const monthDiff = today.getUTCMonth() - dob.getUTCMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && today.getUTCDate() < dob.getUTCDate())) {
+      age--;
+    }
+
+    if (age < 0 || age > 120) {
+      throw new Error('INVALID_AGE');
+    }
+
+    userUpdates.date_of_birth = dob;
+    userUpdates.age = age;
+  }
+
+  // 4. Height (cm)
+  const hInput = height !== undefined ? height : height_cm;
+  let heightChanged = false;
+  if (hInput !== undefined && hInput !== null) {
+    const h = parseFloat(hInput);
+    if (isNaN(h) || h < 50 || h > 300) {
+      throw new Error('INVALID_HEIGHT');
+    }
+    userUpdates.height_cm = h;
+    heightChanged = true;
+  }
+
+  // 5. Weight (kg)
+  const wInput = weight !== undefined ? weight : weight_kg;
+  let weightChanged = false;
+  if (wInput !== undefined && wInput !== null) {
+    const w = parseFloat(wInput);
+    if (isNaN(w) || w < 20 || w > 500) {
+      throw new Error('INVALID_WEIGHT');
+    }
+    userUpdates.weight_kg = w;
+    weightChanged = true;
+  }
+
+  // 6. Avatar ID
+  const avInput = avatar_id !== undefined ? avatar_id : payload.avatarId;
+  if (avInput !== undefined && avInput !== null) {
+    const avId = parseInt(avInput);
+    if (isNaN(avId) || avId <= 0) {
+      throw new Error('INVALID_AVATAR');
+    }
+    const avatar = await prisma.avatars.findUnique({
+      where: { id: BigInt(avId) },
+    });
+    if (!avatar || !avatar.is_active) {
+      throw new Error('AVATAR_NOT_FOUND');
+    }
+    userUpdates.avatar_id = BigInt(avId);
+  }
+
+  // Final height and weight for BMI and Protein goal calculation
+  const finalHeight = userUpdates.height_cm !== undefined ? userUpdates.height_cm : currentUser.height_cm;
+  const finalWeight = userUpdates.weight_kg !== undefined ? userUpdates.weight_kg : currentUser.weight_kg;
+
+  // Recalculate BMI if height or weight changed and both final values exist
+  if ((heightChanged || weightChanged) && finalHeight && finalWeight) {
+    userUpdates.bmi = calculateBMI(finalWeight, finalHeight);
+  }
+
+  // Recalculate daily_protein_goal if weight changed
+  if (weightChanged && finalWeight) {
+    const q9Answer = await prisma.user_onboarding_answers.findUnique({
+      where: {
+        user_id_question_id: {
+          user_id: bUserId,
+          question_id: 9,
+        },
+      },
+    });
+
+    const activityMap = {
+      '15min':    'sedentary',
+      '30min':    'lightly_active',
+      '1hr':      'active',
+      '2hr_plus': 'very_active',
+    };
+
+    const activityKey = activityMap[q9Answer?.answer] || 'sedentary';
+    userUpdates.daily_protein_goal = calculateProtein(finalWeight, activityKey);
+  }
+
+  // Apply DB updates if any fields changed
+  if (Object.keys(userUpdates).length > 0) {
+    userUpdates.updated_at = new Date();
+    await prisma.users.update({
+      where: { id: bUserId },
+      data: userUpdates,
+    });
+  }
+
+  return await getCurrentUser(bUserId);
+}
+
+// ── Get All Active Avatars ──────────────────────────────────
+export async function getAvatars() {
+  const avatars = await prisma.avatars.findMany({
+    where: { is_active: true },
+    orderBy: { id: 'asc' },
+    select: {
+      id: true,
+      name: true,
+      image_url: true,
+      gender: true,
+      is_default: true,
+      unlock_at_level: true,
+    },
+  });
+
+  return avatars;
+}
+
+// ── Update User Avatar ──────────────────────────────────────
+export async function updateUserAvatar(userId, avatarId) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+  if (avatarId === undefined || avatarId === null) {
+    throw new Error('AVATAR_REQUIRED');
+  }
+
+  const avId = parseInt(avatarId);
+  if (isNaN(avId) || avId <= 0) {
+    throw new Error('INVALID_AVATAR');
+  }
+
+  const bAvatarId = BigInt(avId);
+  const avatar = await prisma.avatars.findUnique({
+    where: { id: bAvatarId },
+  });
+
+  if (!avatar || !avatar.is_active) {
+    throw new Error('AVATAR_NOT_FOUND');
+  }
+
+  await prisma.users.update({
+    where: { id: bUserId },
+    data: {
+      avatar_id: bAvatarId,
+      updated_at: new Date(),
+    },
+  });
+
+  return await getCurrentUser(bUserId);
+}
+
+// ── Update User Email ────────────────────────────────────────
+export async function updateUserEmail(userId, email) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  if (!email || typeof email !== 'string') {
+    throw new Error('EMAIL_REQUIRED');
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  if (!isValidEmail(normalizedEmail)) {
+    throw new Error('INVALID_EMAIL');
+  }
+
+  const currentUser = await prisma.users.findUnique({
+    where: { id: bUserId },
+    select: { id: true, email: true },
+  });
+
+  if (!currentUser) {
+    throw new Error('USER_NOT_FOUND');
+  }
+
+  // If email is unchanged, return current user
+  if (currentUser.email === normalizedEmail) {
+    return await getCurrentUser(bUserId);
+  }
+
+  // Check if email is already taken by another user
+  const existingUser = await prisma.users.findFirst({
+    where: {
+      email: normalizedEmail,
+      id: { not: bUserId },
+    },
+  });
+
+  if (existingUser) {
+    throw new Error('EMAIL_EXISTS');
+  }
+
+  await prisma.users.update({
+    where: { id: bUserId },
+    data: {
+      email: normalizedEmail,
+      updated_at: new Date(),
+    },
+  });
+
+  return await getCurrentUser(bUserId);
+}
+
+
+

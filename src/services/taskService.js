@@ -416,3 +416,123 @@ export async function reopenTask(userId, taskId) {
     status:    'PENDING',
   };
 }
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/users/activity — Summary metrics & paginated quest logs
+// ─────────────────────────────────────────────────────────────
+
+function formatDateLabel(completionDate) {
+  if (!completionDate) return '';
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  const compIST = new Date(completionDate.getTime() + IST_OFFSET_MS);
+
+  const todayMidnight = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()));
+  const compMidnight = new Date(Date.UTC(compIST.getUTCFullYear(), compIST.getUTCMonth(), compIST.getUTCDate()));
+
+  const diffMs = todayMidnight.getTime() - compMidnight.getTime();
+  const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays > 1 && diffDays < 7) return `${diffDays}d ago`;
+
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${compMidnight.getUTCDate()} ${months[compMidnight.getUTCMonth()]}`;
+}
+
+export async function getUserActivity(userId, pageParam = 1, limitParam = 10) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  const page = Math.max(1, parseInt(pageParam) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(limitParam) || 10));
+  const skip = (page - 1) * limit;
+
+  // 1. Fetch user & progression data for summary cards
+  const user = await prisma.users.findUnique({
+    where: { id: bUserId },
+    select: {
+      id: true,
+      created_at: true,
+      user_progression: {
+        select: {
+          daily_streak: true,
+          longest_streak: true,
+        },
+      },
+    },
+  });
+
+  if (!user) throw new Error('USER_NOT_FOUND');
+
+  // Total count of completed quests
+  const totalCompletions = await prisma.task_completions.count({
+    where: {
+      user_id: bUserId,
+      status: 'COMPLETED',
+    },
+  });
+
+  // 2. Fetch paginated completed task logs
+  const rawLogs = await prisma.task_completions.findMany({
+    where: {
+      user_id: bUserId,
+      status: 'COMPLETED',
+    },
+    orderBy: [
+      { completed_at: 'desc' },
+      { id: 'desc' },
+    ],
+    skip,
+    take: limit,
+    include: {
+      tasks: {
+        select: {
+          id: true,
+          title: true,
+          task_type: true,
+          tag: true,
+          xp_reward: true,
+        },
+      },
+    },
+  });
+
+  // 3. Format quest logs
+  const logs = rawLogs.map(log => {
+    const compDate = log.completed_at || log.created_at || log.schedule_date;
+    const dateObj = new Date(compDate);
+    const dayNumber = log.schedule_date ? new Date(log.schedule_date).getUTCDate() : dateObj.getUTCDate();
+
+    return {
+      id: log.id,
+      task_id: log.task_id,
+      title: log.tasks?.title || 'Completed Task',
+      xp_earned: log.xp_earned,
+      schedule_date: log.schedule_date ? log.schedule_date.toISOString().slice(0, 10) : null,
+      completed_at: log.completed_at || log.created_at,
+      day_number: dayNumber,
+      date_label: formatDateLabel(compDate),
+    };
+  });
+
+  const totalPages = Math.ceil(totalCompletions / limit) || 0;
+
+  return {
+    summary: {
+      member_since: user.created_at,
+      current_streak: user.user_progression?.daily_streak ?? 0,
+      best_record: user.user_progression?.longest_streak ?? 0,
+      total_quests_cleared: totalCompletions,
+    },
+    logs,
+    pagination: {
+      page,
+      limit,
+      total_count: totalCompletions,
+      total_pages: totalPages,
+      has_next_page: page < totalPages,
+    },
+  };
+}
+

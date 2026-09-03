@@ -273,13 +273,93 @@ async function seedStreakMilestones() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Finalized Avatars Dataset (10 Avatars)
+// ─────────────────────────────────────────────────────────────
+
+const AVATARS = [
+  {
+    name:       'Ren, the Frost Blade',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1788468328/hunterx/app-assets/arise_avatar_11.jpg',
+    gender:     'female',
+    is_default: false,
+  },
+  {
+    name:       'Draven, the Ember Knight',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861199/hunterx/app-assets/arise_avatar_8.png',
+    gender:     'male',
+    is_default: false,
+  },
+  {
+    name:       "Vesa, the Viper's Gaze",
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861198/hunterx/app-assets/arise_avatar_7.png',
+    gender:     'female',
+    is_default: false,
+  },
+  {
+    name:       'Rook, the Grinning Wolf',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861196/hunterx/app-assets/arise_avatar_6.png',
+    gender:     'male',
+    is_default: false,
+  },
+  {
+    name:       'Silas, the Hollow Wanderer',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861195/hunterx/app-assets/arise_avatar_5.png',
+    gender:     'male',
+    is_default: false,
+  },
+  {
+    name:       'Talon, the Scarred Sentinel',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861193/hunterx/app-assets/arise_avatar_4.png',
+    gender:     'female',
+    is_default: true,
+  },
+  {
+    name:       'Isolde, the Silver Wraith',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861192/hunterx/app-assets/arise_avatar_3.png',
+    gender:     'female',
+    is_default: false,
+  },
+  {
+    name:       'Corvin, the Quiet Analyst',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861187/hunterx/app-assets/arise_avatar_1.png',
+    gender:     'male',
+    is_default: false,
+  },
+  {
+    name:       'Zane, the Void Stare',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861190/hunterx/app-assets/arise_avatar_2.png',
+    gender:     'male',
+    is_default: true,
+  },
+  {
+    name:       'Kael, the Crimson Eye',
+    image_url:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861200/hunterx/app-assets/arise_avatar_9.png',
+    gender:     'male',
+    is_default: false,
+  },
+];
+
+async function seedAvatars() {
+  for (const avatar of AVATARS) {
+    await prisma.avatars.upsert({
+      where:  { name: avatar.name },
+      create: avatar,
+      update: avatar,
+    });
+    console.log(`UPSERTED avatar name="${avatar.name}"`);
+  }
+}
+
 async function main() {
   await seedDragonStages();  // before tasks/users — FK dependency
   await seedDailyTasks();
   await seedBadges();
   await seedLevels();
   await seedStreakMilestones();
+  await seedAvatars();
 }
+
 
 main()
   .catch(err => {

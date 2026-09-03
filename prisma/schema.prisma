@@ -21,8 +21,10 @@ model auth_providers {
 
 model avatars {
   id              BigInt    @id @default(autoincrement())
-  name            String    @db.VarChar(100)
+  name            String    @unique @db.VarChar(100)
   image_url       String    @db.VarChar(500)
+  gender          String?   @db.VarChar(20)
+  is_default      Boolean   @default(false)
   unlock_at_level Int       @default(0)
   is_active       Boolean   @default(true)
   created_at      DateTime? @default(now()) @db.Timestamp(6)
@@ -521,6 +523,7 @@ model users {
   user_fcm_tokens                                         user_fcm_tokens[]
   user_onboarding_answers                                 user_onboarding_answers[]
   user_progression                                        user_progression?
+  user_settings                                           user_settings?
   user_rewards                                            user_rewards[]
   user_streak_milestones                                  user_streak_milestones[]
   dragon_stages                                           dragon_stages              @relation(fields: [dragon_stage], references: [stage_number], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_dragon_stage")
@@ -693,4 +696,23 @@ enum user_gender {
 enum user_role {
   USER
   ADMIN
+}
+
+
+model user_settings {
+  id                         BigInt    @id @default(autoincrement())
+  user_id                    BigInt    @unique
+  units                      String    @default("metric") @db.VarChar(10)
+  notify_all                 Boolean   @default(true)
+  notify_daily_motivation    Boolean   @default(true)
+  notify_task_reminders      Boolean   @default(true)
+  notify_streak_preservation Boolean   @default(true)
+  notify_streak_milestones   Boolean   @default(true)
+  notify_streak_freeze       Boolean   @default(true)
+  notify_level_up            Boolean   @default(true)
+  notify_reward_ready        Boolean   @default(true)
+  notify_announcements       Boolean   @default(true)
+  created_at                 DateTime? @default(now()) @db.Timestamp(6)
+  updated_at                 DateTime? @default(now()) @db.Timestamp(6)
+  users                      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 }
