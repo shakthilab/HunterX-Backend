@@ -34,14 +34,16 @@ function resolveTarget(task, user) {
 // with the user's completion status/XP for the current period
 // ─────────────────────────────────────────────────────────────
 
-export async function getTodayTasks(userId) {
+export async function getTodayTasks(userId, overrideGender = null) {
   const bUserId = BigInt(userId);
 
   const user = await prisma.users.findUnique({
     where:  { id: bUserId },
-    select: { daily_protein_goal: true },
+    select: { daily_protein_goal: true, gender: true },
   });
   if (!user) throw new Error('USER_NOT_FOUND');
+
+  const effectiveGender = (overrideGender ?? user.gender ?? '').toString().toUpperCase();
 
   const todayDate     = getISTDateOnly();
   const weekStartDate = getISTWeekStart();
@@ -101,29 +103,35 @@ export async function getTodayTasks(userId) {
   function serialize(task) {
     const periodDate = periodDateFor(task.task_type);
     const completion = completionMap.get(`${task.id}_${dateKey(periodDate)}`) || null;
+    const isFemale = effectiveGender === 'FEMALE';
+    const resolvedImageUrl = isFemale
+      ? (task.image_url_female ?? task.image_url_male ?? task.image_url)
+      : (task.image_url_male ?? task.image_url);
 
     return {
-      id:             task.id,
-      title:          task.title,
-      description:    task.description,
-      tag:            task.tag,
-      image_url:      task.image_url,
-      task_type:      task.task_type,
-      xp_reward:      task.xp_reward,
-      xp_partial:     task.xp_partial,
-      allows_partial: task.allows_partial,
-      target_value:   resolveTarget(task, user),
-      target_unit:    task.target_unit,
-      is_recurring:   task.is_recurring,
+      id:               task.id,
+      title:            task.title,
+      description:      task.description,
+      tag:              task.tag,
+      image_url:        resolvedImageUrl,
+      image_url_male:   task.image_url_male,
+      image_url_female: task.image_url_female,
+      task_type:        task.task_type,
+      xp_reward:        task.xp_reward,
+      xp_partial:       task.xp_partial,
+      allows_partial:   task.allows_partial,
+      target_value:     resolveTarget(task, user),
+      target_unit:      task.target_unit,
+      is_recurring:     task.is_recurring,
       // null for DAILY_FIXED (no admin-set window); for DAILY_ADMIN/WEEKLY
       // this is the task's validity window — see adminTaskService.js
-      start_date:     task.start_date ? dateKey(task.start_date) : null,
-      end_date:       task.end_date ? dateKey(task.end_date) : null,
+      start_date:       task.start_date ? dateKey(task.start_date) : null,
+      end_date:         task.end_date ? dateKey(task.end_date) : null,
       // Not a DB value — PENDING just means "no completion row yet"
-      status:         completion?.status ?? 'PENDING',
-      progress_value: completion?.progress_value ?? null,
-      xp_earned:      completion?.xp_earned ?? 0,
-      completed_at:   completion?.completed_at ?? null,
+      status:           completion?.status ?? 'PENDING',
+      progress_value:   completion?.progress_value ?? null,
+      xp_earned:        completion?.xp_earned ?? 0,
+      completed_at:     completion?.completed_at ?? null,
     };
   }
 

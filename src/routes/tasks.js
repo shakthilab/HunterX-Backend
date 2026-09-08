@@ -16,7 +16,7 @@ const router = Router();
 
 router.get('/today', verifyToken, async (req, res, next) => {
   try {
-    const result = await taskService.getTodayTasks(req.user.id);
+    const result = await taskService.getTodayTasks(req.user.id, req.user.gender);
     return success(res, result, 'Tasks fetched');
   } catch (err) {
     if (err.message === 'USER_NOT_FOUND')

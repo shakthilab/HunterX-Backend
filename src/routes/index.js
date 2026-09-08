@@ -7,6 +7,8 @@ import avatarsRouter from './avatars.js';
 import tasksRouter from './tasks.js';
 import adminRouter from './admin.js';
 import mediaRouter from './media.js';
+import ratingsRouter from './ratings.js';
+import feedbackRouter from './feedback.js';
 
 const router = Router();
 
@@ -37,6 +39,12 @@ router.use('/admin', adminRouter);
 
 // Signed Cloudinary uploads
 router.use('/media', mediaRouter);
+
+// Rate HunterX (single current rating per user)
+router.use('/ratings', ratingsRouter);
+
+// Send Feedback screen
+router.use('/feedback', feedbackRouter);
 
 export default router;
 

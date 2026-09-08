@@ -10,36 +10,91 @@
 
 import { createNotification } from './notificationService.js';
 
-export async function grantStreakMilestoneReward(tx, userId, milestone) {
-  const alreadyAwarded = await tx.user_streak_milestones.findUnique({
-    where: { user_id_milestone_id: { user_id: userId, milestone_id: milestone.id } },
-  });
-  if (alreadyAwarded) return { granted: false };
+export const STREAK_MILESTONE_BADGES = {
+  7:   { name: 'Ember Vow',          description: 'Reached a 7-day daily streak' },
+  14:  { name: 'Iron Resolve',       description: 'Reached a 14-day daily streak' },
+  30:  { name: 'Shadow Oath',        description: 'Reached a 30-day daily streak' },
+  60:  { name: 'Phantom Discipline', description: 'Reached a 60-day daily streak' },
+  90:  { name: 'Sovereign Will',     description: 'Reached a 90-day daily streak' },
+  200: { name: 'Void Ascendant',     description: 'Reached a 200-day daily streak' },
+  365: { name: 'Eternal Hunter',     description: 'Reached a 365-day daily streak' },
+};
 
-  await tx.user_streak_milestones.create({
-    data: {
-      user_id:      userId,
-      milestone_id: milestone.id,
-      streak_days:  milestone.streak_days,
+export async function checkAndAwardStreakMilestoneBadge(tx, userId, streakDays) {
+  const badgeInfo = STREAK_MILESTONE_BADGES[streakDays];
+  if (!badgeInfo) return { granted: false };
+
+  // Find or create the badge row in badges table if missing
+  let badge = await tx.badges.findUnique({
+    where: { name: badgeInfo.name },
+  });
+
+  if (!badge) {
+    badge = await tx.badges.create({
+      data: {
+        name:        badgeInfo.name,
+        description: badgeInfo.description,
+        badge_type:  'STREAK',
+      },
+    });
+  }
+
+  // Idempotency check — check if badge already earned in user_badges
+  const existingUserBadge = await tx.user_badges.findUnique({
+    where: {
+      user_id_badge_id: {
+        user_id:  userId,
+        badge_id: badge.id,
+      },
     },
   });
 
-  if (milestone.reward_type === 'COUPON') {
-    await grantCoupon(tx, userId, milestone);
-  } else if (milestone.reward_type === 'BADGE') {
-    await grantBadge(tx, userId, milestone);
+  if (existingUserBadge) {
+    return { granted: false, badge };
   }
-  // XP_BONUS is intentionally not handled — streak milestones no longer
-  // pay XP (see prisma/seed.js STREAK_MILESTONES).
 
+  // Insert permanent record in user_badges
+  await tx.user_badges.create({
+    data: {
+      user_id:  userId,
+      badge_id: badge.id,
+      earned_at: new Date(),
+    },
+  });
+
+  // Also record in user_streak_milestones if milestone exists
+  const milestone = await tx.streak_milestones.findUnique({ where: { streak_days: streakDays } });
+  if (milestone) {
+    const alreadyInUserMilestones = await tx.user_streak_milestones.findUnique({
+      where: { user_id_milestone_id: { user_id: userId, milestone_id: milestone.id } },
+    });
+    if (!alreadyInUserMilestones) {
+      await tx.user_streak_milestones.create({
+        data: {
+          user_id:      userId,
+          milestone_id: milestone.id,
+          streak_days:  streakDays,
+        },
+      });
+      if (milestone.reward_type === 'COUPON') {
+        await grantCoupon(tx, userId, milestone);
+      }
+    }
+  }
+
+  // Fire STREAK_MILESTONE notification
   await createNotification(
     tx, userId, 'STREAK_MILESTONE',
-    `${milestone.streak_days}-day streak!`,
-    milestone.description || `You've hit a ${milestone.streak_days}-day streak.`,
-    { event: 'STREAK_MILESTONE', streak_days: milestone.streak_days, reward_type: milestone.reward_type }
+    `${streakDays}-day streak!`,
+    badgeInfo.description || `You've hit a ${streakDays}-day streak.`,
+    { event: 'STREAK_MILESTONE', streak_days: streakDays, badge_id: badge.id, badge_name: badge.name }
   );
 
-  return { granted: true };
+  return { granted: true, badge };
+}
+
+export async function grantStreakMilestoneReward(tx, userId, milestone) {
+  return await checkAndAwardStreakMilestoneBadge(tx, userId, milestone.streak_days);
 }
 
 const TRIGGER_BY_STREAK_DAYS = {
@@ -47,10 +102,6 @@ const TRIGGER_BY_STREAK_DAYS = {
   30: 'STREAK_30', 60: 'STREAK_60', 90: 'STREAK_90',
 };
 
-// Claims one unassigned reward_pool code for this user. A no-op (besides
-// the milestone record + notification already written above) when the
-// pool is empty for this trigger — inventory is an ops/seeding concern,
-// not something a streak completion should ever fail on.
 async function grantCoupon(tx, userId, milestone) {
   const trigger = TRIGGER_BY_STREAK_DAYS[milestone.streak_days];
   if (!trigger) return;
@@ -64,10 +115,6 @@ async function grantCoupon(tx, userId, milestone) {
   });
 }
 
-// Awards the badge whose name matches this milestone's description, if
-// one has been seeded under that name (see BADGES in prisma/seed.js) —
-// same "content not seeded is a no-op, not an error" stance as
-// grantCoupon.
 async function grantBadge(tx, userId, milestone) {
   const badge = await tx.badges.findFirst({ where: { name: milestone.description } });
   if (!badge) return;
@@ -78,3 +125,4 @@ async function grantBadge(tx, userId, milestone) {
     update: {},
   });
 }
+

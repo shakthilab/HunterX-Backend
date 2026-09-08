@@ -7,6 +7,23 @@ datasource db {
   provider = "postgresql"
 }
 
+// A user's current "Rate HunterX" rating — one row per user (upserted on
+// resubmission, not a history log). stars is additionally CHECK-constrained
+// to 1-5 at the DB level (see migration); category is free-form VARCHAR at
+// the DB level but validated against a fixed enum in the app layer.
+model app_ratings {
+  id          BigInt    @id @default(autoincrement())
+  user_id     BigInt    @unique(map: "unique_user_rating")
+  stars       Int       @db.SmallInt
+  category    String?   @db.VarChar(30)
+  comment     String?
+  app_version String?   @db.VarChar(30)
+  device_os   String?   @db.VarChar(30)
+  created_at  DateTime? @default(now()) @db.Timestamp(6)
+  updated_at  DateTime? @default(now()) @db.Timestamp(6)
+  users       users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
 model auth_providers {
   id          BigInt             @id @default(autoincrement())
   user_id     BigInt
@@ -55,6 +72,17 @@ model campaigns {
   created_at      DateTime? @default(now()) @db.Timestamp(6)
   badges          badges?   @relation(fields: [reward_badge_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   seasons         seasons?  @relation(fields: [season_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+// Tracks "Download My Data" requests — doubles as the audit log and the
+// per-user 24h rate-limit clock for POST /api/users/me/data-export.
+model data_export_requests {
+  id           BigInt   @id @default(autoincrement())
+  user_id      BigInt
+  requested_at DateTime @default(now()) @db.Timestamp(6)
+  users        users    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id, requested_at], map: "idx_data_export_requests_user_time")
 }
 
 model discovery_interests {
@@ -117,6 +145,25 @@ model dragon_stages {
   users                  users[]
 
   @@index([stage_number], map: "idx_dragon_stage_number")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model feedback {
+  id             BigInt    @id @default(autoincrement())
+  user_id        BigInt?
+  category       String    @db.VarChar(30) // 'bug_report' | 'suggestion' | 'other'
+  message        String
+  attachment_url String?   @db.VarChar(500)
+  allow_followup Boolean   @default(true)
+  status         String    @default("received") @db.VarChar(20) // 'received' | 'in_review' | 'resolved'
+  app_version    String?   @db.VarChar(30)
+  device_os      String?   @db.VarChar(30)
+  user_level     Int?
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  updated_at     DateTime? @default(now()) @db.Timestamp(6)
+  users          users?    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id, created_at], map: "idx_feedback_user_created")
 }
 
 model health_metrics {
@@ -336,6 +383,8 @@ model tasks {
   description        String?
   tag                String?              @db.VarChar(100)
   image_url          String?              @db.VarChar(500)
+  image_url_male     String?              @db.VarChar(500)
+  image_url_female   String?              @db.VarChar(500)
   task_type          task_type
   xp_reward          Int                  @default(50)
   xp_partial         Int                  @default(25)
@@ -500,12 +549,15 @@ model users {
   oath_accepted_at                                        DateTime?                  @db.Timestamp(6)
   created_at                                              DateTime?                  @default(now()) @db.Timestamp(6)
   updated_at                                              DateTime?                  @default(now()) @db.Timestamp(6)
+  app_ratings                                             app_ratings?
   auth_providers                                          auth_providers[]
+  data_export_requests                                    data_export_requests[]
   discovery_matches_discovery_matches_unmatched_byTousers discovery_matches[]        @relation("discovery_matches_unmatched_byTousers")
   discovery_matches_discovery_matches_user_a_idTousers    discovery_matches[]        @relation("discovery_matches_user_a_idTousers")
   discovery_matches_discovery_matches_user_b_idTousers    discovery_matches[]        @relation("discovery_matches_user_b_idTousers")
   discovery_swipes_discovery_swipes_swiped_idTousers      discovery_swipes[]         @relation("discovery_swipes_swiped_idTousers")
   discovery_swipes_discovery_swipes_swiper_idTousers      discovery_swipes[]         @relation("discovery_swipes_swiper_idTousers")
+  feedback                                                feedback[]
   health_metrics                                          health_metrics[]
   leaderboard                                             leaderboard?
   messages                                                messages[]
@@ -697,7 +749,6 @@ enum user_role {
   USER
   ADMIN
 }
-
 
 model user_settings {
   id                         BigInt    @id @default(autoincrement())

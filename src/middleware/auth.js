@@ -25,6 +25,7 @@ export async function verifyToken(req, res, next) {
         hunter_id: true,
         name:     true,
         email:    true,
+        gender:   true,
       },
     });
 
@@ -36,7 +37,10 @@ export async function verifyToken(req, res, next) {
       return error(res, 'Your account has been suspended', 403);
     }
 
-    req.user = user;
+    req.user = {
+      ...user,
+      gender: decoded.gender || user.gender,
+    };
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {

@@ -5,6 +5,7 @@ import { verifyToken }       from '../middleware/auth.js';
 import { verifyAdmin }       from '../middleware/adminAuth.js';
 import { success, error }    from '../utils/response.js';
 import * as adminTaskService from '../services/adminTaskService.js';
+import * as feedbackService  from '../services/feedbackService.js';
 
 const router = Router();
 
@@ -60,6 +61,25 @@ router.post('/tasks', verifyToken, verifyAdmin, async (req, res, next) => {
     if (badRequest[err.message]) return error(res, badRequest[err.message], 400);
     if (err.message === 'TARGET_USER_NOT_FOUND')
       return error(res, 'One or more target_user_ids do not exist', 404);
+    next(err);
+  }
+});
+
+// ── PATCH /api/admin/feedback/:id/status ──────────────────
+// Admin-only. Updates a feedback submission's review status.
+// Header: Authorization: Bearer <access_token>  (role must be ADMIN)
+router.patch('/feedback/:id/status', verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const { status } = req.body || {};
+    const feedback = await feedbackService.updateFeedbackStatus(req.params.id, status);
+    return success(res, { feedback }, 'Feedback status updated');
+  } catch (err) {
+    if (err.message === 'INVALID_STATUS')
+      return error(res, `status must be one of: ${feedbackService.FEEDBACK_STATUSES.join(', ')}`, 400);
+    if (err.message === 'INVALID_FEEDBACK_ID')
+      return error(res, 'Invalid feedback id', 400);
+    if (err.message === 'FEEDBACK_NOT_FOUND')
+      return error(res, 'Feedback not found', 404);
     next(err);
   }
 });

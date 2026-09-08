@@ -38,7 +38,7 @@
 
 import prisma from '../config/prisma.js';
 import { getISTDateOnly } from '../utils/helpers.js';
-import { grantStreakMilestoneReward } from './rewardService.js';
+import { grantStreakMilestoneReward, checkAndAwardStreakMilestoneBadge } from './rewardService.js';
 
 const MS_PER_DAY   = 24 * 60 * 60 * 1000;
 const MAX_LIVES     = 2;
@@ -101,14 +101,17 @@ export async function bumpDailyStreak(tx, userId) {
     },
   });
 
-  // Milestone rewards are physical/cosmetic only (scratch card, coupon,
-  // badge, ...) — no XP involved, see rewardService.js. Keyed off the
-  // absolute streak_days reached, so a milestone is granted at most once
-  // per user ever (user_streak_milestones' unique constraint), even if
-  // the streak later resets and climbs back through the same count.
-  const milestone = await tx.streak_milestones.findUnique({ where: { streak_days: newStreak } });
-  if (milestone) {
-    await grantStreakMilestoneReward(tx, userId, milestone);
+  // Milestone rewards & permanent streak badges (Ember Vow, Iron Resolve, Shadow Oath,
+  // Phantom Discipline, Sovereign Will, Void Ascendant, Eternal Hunter).
+  // Idempotent: earned badges are inserted into user_badges once and preserved permanently.
+  const STREAK_MILESTONES_LIST = [7, 14, 30, 60, 90, 200, 365];
+  if (STREAK_MILESTONES_LIST.includes(newStreak)) {
+    await checkAndAwardStreakMilestoneBadge(tx, userId, newStreak);
+  } else {
+    const milestone = await tx.streak_milestones.findUnique({ where: { streak_days: newStreak } });
+    if (milestone) {
+      await grantStreakMilestoneReward(tx, userId, milestone);
+    }
   }
 }
 

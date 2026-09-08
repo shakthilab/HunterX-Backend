@@ -4,8 +4,8 @@ import bcrypt           from 'bcryptjs';
 import crypto           from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import appleSignin      from 'apple-signin-auth';
-import nodemailer        from 'nodemailer';
 import prisma            from '../config/prisma.js';
+import { mailTransporter } from '../utils/mailer.js';
 import { logError }      from '../utils/logger.js';
 import { assignDailyTasks } from './taskAssignmentService.js';
 import { getWeekStatus }    from './taskService.js';
@@ -31,18 +31,6 @@ const GOOGLE_AUDIENCES = [
 ].filter(Boolean);
 
 const googleClient = new OAuth2Client();
-const mailTransporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // true for 465, false for other ports (uses STARTTLS)
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_PASS,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-});
 
 // Removes sensitive fields before sending user to client
 // Never expose password_hash, reset_token, or reset_token_expiry
@@ -610,7 +598,7 @@ export async function registerWithEmail(name, email, password, onboarding = [], 
     where: { id: user.id },
   });
 
-  const tokens = generateTokens(updatedUser.id.toString(), updatedUser.role);
+  const tokens = generateTokens(updatedUser.id.toString(), updatedUser.role, updatedUser.gender);
 
   // Clean up OTP record — no longer needed after registration
   await prisma.email_otps.deleteMany({ where: { email } });
@@ -636,7 +624,7 @@ export async function loginWithEmail(email, password) {
   const valid = await bcrypt.compare(password, user.password_hash);
   if (!valid) throw new Error('INVALID_CREDENTIALS');
 
-  const tokens = generateTokens(user.id.toString(), user.role);
+  const tokens = generateTokens(user.id.toString(), user.role, user.gender);
 
   return {
     user:  sanitizeUser(user),
@@ -681,7 +669,7 @@ export async function loginWithGoogle(idToken, onboarding = [], referralCode = n
       where: { id: existingProvider.user_id },
     });
     if (!user || user.is_banned) throw new Error('ACCOUNT_BANNED');
-    const tokens = generateTokens(user.id.toString(), user.role);
+    const tokens = generateTokens(user.id.toString(), user.role, user.gender);
     return { user: sanitizeUser(user), ...tokens, isNew: false };
   }
 
@@ -701,7 +689,7 @@ export async function loginWithGoogle(idToken, onboarding = [], referralCode = n
       if (onboarding.length > 0 && !existingByEmail.onboarding_done) {
         await processOnboarding(existingByEmail.id, onboarding);
       }
-      const tokens = generateTokens(existingByEmail.id.toString(), existingByEmail.role);
+      const tokens = generateTokens(existingByEmail.id.toString(), existingByEmail.role, existingByEmail.gender);
       return { user: sanitizeUser(existingByEmail), ...tokens, isNew: false, linked: true };
     }
   }
@@ -718,7 +706,7 @@ export async function loginWithGoogle(idToken, onboarding = [], referralCode = n
   await processOnboarding(user.id, onboarding);
 
   const updatedUser = await prisma.users.findUnique({ where: { id: user.id } });
-  const tokens      = generateTokens(updatedUser.id.toString(), updatedUser.role);
+  const tokens      = generateTokens(updatedUser.id.toString(), updatedUser.role, updatedUser.gender);
 
   return { user: sanitizeUser(updatedUser), ...tokens, isNew: true };
 }
@@ -750,7 +738,7 @@ export async function loginWithApple(idToken, nonce, onboarding = [], referralCo
       where: { id: existingProvider.user_id },
     });
     if (!user || user.is_banned) throw new Error('ACCOUNT_BANNED');
-    const tokens = generateTokens(user.id.toString(), user.role);
+    const tokens = generateTokens(user.id.toString(), user.role, user.gender);
     return { user: sanitizeUser(user), ...tokens, isNew: false };
   }
 
@@ -768,7 +756,7 @@ export async function loginWithApple(idToken, nonce, onboarding = [], referralCo
       if (onboarding.length > 0 && !existingByEmail.onboarding_done) {
         await processOnboarding(existingByEmail.id, onboarding);
       }
-      const tokens = generateTokens(existingByEmail.id.toString(), existingByEmail.role);
+      const tokens = generateTokens(existingByEmail.id.toString(), existingByEmail.role, existingByEmail.gender);
       return { user: sanitizeUser(existingByEmail), ...tokens, isNew: false, linked: true };
     }
   }
@@ -789,7 +777,7 @@ export async function loginWithApple(idToken, nonce, onboarding = [], referralCo
   await processOnboarding(user.id, onboarding);
 
   const updatedUser = await prisma.users.findUnique({ where: { id: user.id } });
-  const tokens      = generateTokens(updatedUser.id.toString(), updatedUser.role);
+  const tokens      = generateTokens(updatedUser.id.toString(), updatedUser.role, updatedUser.gender);
 
   return { user: sanitizeUser(updatedUser), ...tokens, isNew: true };
 }
@@ -807,7 +795,7 @@ export async function refreshAccessToken(refreshToken) {
   if (!user)           throw new Error('USER_NOT_FOUND');
   if (user.is_banned)  throw new Error('ACCOUNT_BANNED');
 
-  const tokens = generateTokens(user.id.toString(), user.role);
+  const tokens = generateTokens(user.id.toString(), user.role, user.gender);
   return { user: sanitizeUser(user), ...tokens };
 }
 
@@ -1024,6 +1012,65 @@ export async function getCurrentUser(userId) {
   const { auth_providers, ...flatUser } = user;
   flatUser.auth_provider = auth_providers?.[0]?.provider || null;
   flatUser.week_status   = await getWeekStatus(bUserId);
+
+  if (flatUser.user_progression) {
+    const currentLvlNum = flatUser.user_progression.current_level || 1;
+    const nextLvlNum    = currentLvlNum + 1;
+
+    const levelRows = await prisma.levels.findMany({
+      where: { level_number: { in: [currentLvlNum, nextLvlNum] } },
+    });
+
+    const currentLevelRow = levelRows.find(l => l.level_number === currentLvlNum);
+    const nextLevelRow    = levelRows.find(l => l.level_number === nextLvlNum);
+
+    flatUser.user_progression = {
+      ...flatUser.user_progression,
+      current_level_name:     currentLevelRow?.title || null,
+      current_level_title:    currentLevelRow?.title || null,
+      rank_name:              currentLevelRow?.rank_name || null,
+      rank:                   currentLevelRow?.rank_name || null,
+      next_level_rank:        nextLevelRow?.rank_name || null,
+      next_level_rank_name:   nextLevelRow?.rank_name || null,
+      next_level_xp_required: nextLevelRow?.xp_required ?? null,
+      next_level_required_xp: nextLevelRow?.xp_required ?? null,
+    };
+  }
+
+  const STREAK_BADGE_DAYS_MAP = {
+    'Ember Vow': 7,
+    'Iron Resolve': 14,
+    'Shadow Oath': 30,
+    'Phantom Discipline': 60,
+    'Sovereign Will': 90,
+    'Void Ascendant': 200,
+    'Eternal Hunter': 365,
+  };
+
+  const rawBadges = await prisma.user_badges.findMany({
+    where: { user_id: bUserId },
+    orderBy: { earned_at: 'asc' },
+    include: {
+      badges: true,
+    },
+  });
+
+  flatUser.badges = rawBadges.map((ub) => {
+    const milestoneDays = STREAK_BADGE_DAYS_MAP[ub.badges.name] ?? null;
+    const badgeType = (ub.badges.badge_type === 'STREAK' || milestoneDays !== null)
+      ? 'STREAK_MILESTONE'
+      : ub.badges.badge_type;
+
+    return {
+      badge_id:       Number(ub.badge_id),
+      name:           ub.badges.name,
+      description:    ub.badges.description || null,
+      image_url:      ub.badges.image_url || null,
+      badge_type:     badgeType,
+      earned_at:      ub.earned_at,
+      milestone_days: milestoneDays,
+    };
+  });
 
   return flatUser;
 }

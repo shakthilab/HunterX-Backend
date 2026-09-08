@@ -42,6 +42,8 @@ export async function createTask(adminId, body) {
     description,
     tag,
     image_url,
+    image_url_male,
+    image_url_female,
     task_type,
     xp_reward,
     xp_partial,
@@ -99,10 +101,12 @@ export async function createTask(adminId, body) {
   }
 
   const data = {
-    title:          title.trim(),
-    description:    description ?? null,
-    tag:            tag ?? null,
-    image_url:      image_url ?? null,
+    title:            title.trim(),
+    description:      description ?? null,
+    tag:              tag ?? null,
+    image_url:        image_url ?? image_url_male ?? null,
+    image_url_male:   image_url_male ?? image_url ?? null,
+    image_url_female: image_url_female ?? null,
     task_type,
     xp_reward:      resolvedXpReward,
     xp_partial:     allows_partial ? xp_partial : 0,

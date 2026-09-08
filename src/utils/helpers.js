@@ -119,9 +119,11 @@ export function isStrongPassword(password) {
 }
 
 // Generate access + refresh token pair
-export function generateTokens(userId, role) {
+export function generateTokens(userId, role, gender) {
+  const payload = { userId, role };
+  if (gender) payload.gender = gender;
   const accessToken = jwt.sign(
-    { userId, role },
+    payload,
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_ACCESS_EXPIRES || '15m' }
   );
