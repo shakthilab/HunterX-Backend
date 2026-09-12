@@ -7,6 +7,7 @@ import * as authService   from '../services/authService.js';
 import * as taskService   from '../services/taskService.js';
 import * as userSettingsService from '../services/userSettingsService.js';
 import * as dataExportService from '../services/dataExportService.js';
+import * as healthMetricsService from '../services/healthMetricsService.js';
 
 const router = Router();
 
@@ -151,6 +152,43 @@ router.post('/me/data-export', verifyToken, async (req, res, next) => {
     }
     if (err.message === 'EXPORT_EMAIL_FAILED')
       return error(res, 'Failed to send your data export email. Please try again later.', 502);
+    next(err);
+  }
+});
+
+// ── POST /api/users/me/health-metrics ─────────────────────
+// Passive sync target for the client's Apple HealthKit / Google Health
+// Connect reads — UPSERTs on (user_id, date), so a re-sync of the same
+// day (e.g. corrected end-of-day totals) overwrites rather than
+// duplicates. Nothing here feeds task completion, XP, or streaks.
+router.post('/me/health-metrics', verifyToken, async (req, res, next) => {
+  try {
+    await healthMetricsService.upsertDailyMetrics(req.user.id, req.body || {});
+    return res.json({ success: true });
+  } catch (err) {
+    const badRequest = {
+      DATE_REQUIRED:         'date is required',
+      INVALID_DATE:          'date must be a valid YYYY-MM-DD date',
+      DATE_IN_FUTURE:        'date cannot be in the future',
+      INVALID_SOURCE:        `source must be one of: ${healthMetricsService.HEALTH_SOURCES.join(', ')}`,
+      INVALID_NUMERIC_FIELD: 'numeric fields must be zero or greater',
+    };
+    if (badRequest[err.message]) return error(res, badRequest[err.message], 400);
+    next(err);
+  }
+});
+
+// ── GET /api/users/me/health-metrics?range=today|week|month|year ──
+// Powers the Metrics screen's Today/Week/Month/Year tabs. Same response
+// shape for every range value — daily includes one entry per day in
+// range, missing days included as nulls rather than omitted.
+router.get('/me/health-metrics', verifyToken, async (req, res, next) => {
+  try {
+    const { range, summary, daily } = await healthMetricsService.getHealthMetrics(req.user.id, req.query.range);
+    return res.json({ success: true, range, summary, daily });
+  } catch (err) {
+    if (err.message === 'INVALID_RANGE')
+      return error(res, 'range must be one of: today, week, month, year', 400);
     next(err);
   }
 });

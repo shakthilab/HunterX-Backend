@@ -185,6 +185,32 @@ model health_metrics {
   @@index([user_id, metric_date], map: "idx_health_user_date")
 }
 
+// One row per user per calendar day — daily summaries synced from the
+// client's Apple HealthKit / Google Health Connect reads, powering the
+// Metrics screen's Today/Week/Month/Year tabs. Re-syncing the same day
+// overwrites that row (see unique_user_date) instead of duplicating it.
+// Purely a passive data store: nothing else in this backend (task
+// completion, XP, streaks) reads from or writes to this table.
+model health_metrics_daily {
+  id             BigInt    @id @default(autoincrement())
+  user_id        BigInt
+  date           DateTime  @db.Date
+  steps          Int?
+  calories       Int?
+  distance_km    Decimal?  @db.Decimal(6, 2)
+  active_minutes Int?
+  avg_heart_rate Int?
+  sleep_minutes  Int?
+  workout_count  Int?
+  source         String?   @db.VarChar(20) // 'apple_health' | 'health_connect'
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  updated_at     DateTime? @default(now()) @db.Timestamp(6)
+  users          users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, date], map: "unique_user_date")
+  @@index([user_id, date], map: "idx_health_metrics_daily_user_date")
+}
+
 model leaderboard {
   id            BigInt    @id @default(autoincrement())
   user_id       BigInt    @unique
@@ -559,6 +585,7 @@ model users {
   discovery_swipes_discovery_swipes_swiper_idTousers      discovery_swipes[]         @relation("discovery_swipes_swiper_idTousers")
   feedback                                                feedback[]
   health_metrics                                          health_metrics[]
+  health_metrics_daily                                    health_metrics_daily[]
   leaderboard                                             leaderboard?
   messages                                                messages[]
   notifications                                           notifications[]

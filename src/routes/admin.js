@@ -6,6 +6,7 @@ import { verifyAdmin }       from '../middleware/adminAuth.js';
 import { success, error }    from '../utils/response.js';
 import * as adminTaskService from '../services/adminTaskService.js';
 import * as feedbackService  from '../services/feedbackService.js';
+import * as adminUserService from '../services/adminUserService.js';
 
 const router = Router();
 
@@ -80,6 +81,59 @@ router.patch('/feedback/:id/status', verifyToken, verifyAdmin, async (req, res, 
       return error(res, 'Invalid feedback id', 400);
     if (err.message === 'FEEDBACK_NOT_FOUND')
       return error(res, 'Feedback not found', 404);
+    next(err);
+  }
+});
+
+// ── GET /api/admin/users/stats ────────────────────────────
+// Admin-only. The 4 summary cards above the Users table (total users,
+// active today, avg level, avg streak) — always whole-roster, unaffected
+// by the table's own filters below.
+// Header: Authorization: Bearer <access_token>  (role must be ADMIN)
+router.get('/users/stats', verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const stats = await adminUserService.getUserStats();
+    return success(res, { stats }, 'User stats fetched');
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/admin/users/ranks ────────────────────────────
+// Admin-only. Distinct rank list for the "All Ranks" filter dropdown,
+// ordered lowest-level-first.
+// Header: Authorization: Bearer <access_token>  (role must be ADMIN)
+router.get('/users/ranks', verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const ranks = await adminUserService.getRanks();
+    return success(res, { ranks }, 'Ranks fetched');
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/admin/users ──────────────────────────────────
+// Admin-only. Search/filter/paginate the user roster.
+// Header: Authorization: Bearer <access_token>  (role must be ADMIN)
+// Query: search?, rank?, level? ("1-10"), status? (ACTIVE|BANNED),
+//        date_preset? (7d|30d|90d|all), start_date?, end_date? (YYYY-MM-DD),
+//        sort_by? (signup_date|name|level|streak), page?, limit? (max 100)
+router.get('/users', verifyToken, verifyAdmin, async (req, res, next) => {
+  try {
+    const data = await adminUserService.listUsers(req.query);
+    return success(res, data, 'Users fetched');
+  } catch (err) {
+    const badRequest = {
+      INVALID_STATUS:          `status must be one of: ${['ACTIVE', 'BANNED'].join(', ')}`,
+      INVALID_RANK:             'Unknown rank',
+      INVALID_LEVEL_RANGE:      "level must be a range like '1-10'",
+      INVALID_SORT_BY:          'sort_by must be one of: signup_date, name, level, streak',
+      INVALID_DATE_PRESET:      'date_preset must be one of: 7d, 30d, 90d, all',
+      INVALID_START_DATE:       'start_date must be a valid YYYY-MM-DD date',
+      INVALID_END_DATE:         'end_date must be a valid YYYY-MM-DD date',
+      START_AFTER_END_DATE:     'start_date cannot be after end_date',
+    };
+    if (badRequest[err.message]) return error(res, badRequest[err.message], 400);
     next(err);
   }
 });
