@@ -11,16 +11,20 @@
 // ── Streak lives ────────────────────────────────────────────────
 // Every user starts with 1 life (user_progression.streak_lives, DEFAULT
 // 1 — the row is created at signup with just user_id, so this applies to
-// every new account automatically). +1 life is earned every time
-// daily_streak reaches a multiple of 7, capped at 2. A life absorbs one
-// missed day each.
+// every new account automatically). +1 life is earned on reaching the
+// first 7-day streak milestone, capped at 2 — there's no further monthly
+// or recurring grant beyond that.
 //
-// Two ways a gap gets covered:
+// A life only ever forgives a single missed day. Missing 2 or more days
+// in a row (missed_days >= 2) always breaks the streak to 0, no matter
+// how many lives are banked — lives are strictly a "missed exactly one
+// day" save, not a multi-day buffer.
+//
+// Two ways a single-day gap gets covered:
 //   1. Automatic/silent (bumpDailyStreak): if the user just goes ahead
-//      and completes a task after a gap, and enough lives are banked to
-//      cover the whole gap (missed_days <= streak_lives), the gap is
-//      covered transparently and the streak keeps counting — no
-//      confirmation needed.
+//      and completes a task the day after a single missed day, and a
+//      life is banked, the gap is covered transparently and the streak
+//      keeps counting — no confirmation needed.
 //   2. Interactive (getStreakRiskStatus / resolveStreakRisk): called
 //      from GET /api/tasks/today and POST /api/tasks/streak/resolve, so
 //      the app can show the user a "your streak is at risk — use a life
@@ -29,9 +33,8 @@
 //      effect as path 1, just proactive); choosing DROP breaks the
 //      streak to 0 immediately instead of waiting for it to lazily
 //      reset to 1 on next completion.
-// A gap wider than the banked lives can cover is never "at risk" (there's
-// no decision to make) — it just breaks on next completion, same as
-// before streak lives existed.
+// A 2+ day gap is never "at risk" (there's no decision to make, no life
+// can save it) — it just breaks on next completion.
 //
 // XP is never touched by any of this, in either direction — streak
 // state and XP are fully independent ledgers.
@@ -49,7 +52,8 @@ function daysBetween(from, to) {
 }
 
 // missed_days > 0 means at least one full day passed with no activity;
-// covered means enough lives are banked to erase the whole gap.
+// covered means exactly one day was missed and a life is banked to cover
+// it — 2+ consecutive missed days are never covered, regardless of lives.
 function computeGap(progression, today) {
   const lastActive = progression?.last_active_date ?? null;
   const daysSince   = lastActive ? daysBetween(lastActive, today) : null;
@@ -59,7 +63,7 @@ function computeGap(progression, today) {
     daysSince,
     missedDays,
     lives,
-    coveredByLives: missedDays > 0 && missedDays <= lives,
+    coveredByLives: missedDays === 1 && lives >= 1,
   };
 }
 
