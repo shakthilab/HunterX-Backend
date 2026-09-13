@@ -19,14 +19,19 @@ function dateKey(date) {
   return date.toISOString().slice(0, 10);
 }
 
-// Convention: a task with target_value = null and tag = 'NUTRITION' pulls
-// its target from the user's own calculated daily_protein_goal instead of
-// a fixed value on the task row (see prisma/seed.js).
+// Convention: a task with target_value = null pulls its target from a
+// user-specific calculated goal instead of a fixed value on the task row,
+// keyed off the task's tag (see prisma/seed.js).
+const DYNAMIC_TARGET_FIELD_BY_TAG = {
+  NUTRITION: 'daily_protein_goal', // grams — weight + activity level
+  HYDRATE:   'daily_water_goal',   // liters — 35ml/kg bodyweight
+  STEPS:     'daily_steps_goal',   // step count — BMI + age
+};
+
 function resolveTarget(task, user) {
-  if (task.target_value === null && task.tag === 'NUTRITION') {
-    return user.daily_protein_goal ?? null;
-  }
-  return task.target_value;
+  if (task.target_value !== null) return task.target_value;
+  const field = DYNAMIC_TARGET_FIELD_BY_TAG[task.tag];
+  return field ? (user[field] ?? null) : null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -39,7 +44,7 @@ export async function getTodayTasks(userId, overrideGender = null) {
 
   const user = await prisma.users.findUnique({
     where:  { id: bUserId },
-    select: { daily_protein_goal: true, gender: true },
+    select: { daily_protein_goal: true, daily_water_goal: true, daily_steps_goal: true, gender: true },
   });
   if (!user) throw new Error('USER_NOT_FOUND');
 

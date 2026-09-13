@@ -48,6 +48,37 @@ export function calculateProtein(weightKg, activityKey) {
   return parseFloat((weightKg * multiplier).toFixed(1));
 }
 
+// Calculate daily water intake goal in liters — 35ml per kg body weight,
+// the standard hydration guideline (e.g. 70kg -> 2.45L, 90kg -> 3.15L),
+// floored at 3L. Lighter users (many women, lower-weight men) would
+// otherwise land at 1-2L, well under general hydration advice, so the
+// calculated value only ever raises the target above 3L, never below it.
+export function calculateWaterGoal(weightKg) {
+  return parseFloat(Math.max(weightKg * 0.035, 3).toFixed(2));
+}
+
+// Calculate daily step count goal from BMI + age.
+// BMI buckets (WHO classification): underweight and obese users get a
+// lower, more achievable baseline (harder to sustain high-impact cardio
+// at either extreme), normal/overweight users get progressively higher
+// targets to encourage more activity. Age then lowers the target further
+// — -1,000 at 50+, -2,000 (net) at 65+ — with a 3,000-step floor so it
+// never drops to an unreasonably low number.
+export function calculateStepsGoal(bmi, age) {
+  let base;
+  if (bmi < 18.5)    base = 7000;  // underweight
+  else if (bmi < 25) base = 10000; // normal
+  else if (bmi < 30) base = 11000; // overweight
+  else               base = 6000;  // obese — achievable starting point
+
+  let target = base;
+  if (typeof age === 'number' && Number.isFinite(age)) {
+    if (age >= 65)      target -= 2000;
+    else if (age >= 50) target -= 1000;
+  }
+  return Math.max(target, 3000);
+}
+
 // Today's date in IST (UTC+5:30), as a UTC-midnight Date — safe to store
 // in @db.Date columns (schedule_date) without timezone drift.
 // offsetDays lets callers shift forward/back (e.g. -1 for yesterday).

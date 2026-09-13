@@ -48,14 +48,19 @@ const DAILY_TASKS = [
     image_url_female:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1788817326/hunterx/app-assets/sleep_female.jpg',
   },
   {
-    title:            'Drink 3L Water',
-    description:      'Stay hydrated — drink 3 liters of water',
+    title:            'Drink Water',
+    // One-time: this task used to be titled "Drink 3L Water" with a fixed
+    // 3L target. Matching on the old title too (see seedDailyTasks below)
+    // means this updates that existing row in place instead of seeding a
+    // duplicate hydration task for every already-onboarded user.
+    renamedFrom:      'Drink 3L Water',
+    description:      'Stay hydrated — hit your personalized daily water target',
     tag:               'HYDRATE',
     task_type:         'DAILY_FIXED',
     xp_reward:         10,
     xp_partial:        5,
     allows_partial:    true,
-    target_value:      3,
+    target_value:      null, // dynamic — read from users.daily_water_goal per user (35ml/kg bodyweight, see helpers.js#calculateWaterGoal)
     target_unit:       'L',
     level_target:      'ALL',
     is_recurring:      true,
@@ -83,6 +88,24 @@ const DAILY_TASKS = [
     image_url_male:    'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1787861229/hunterx/app-assets/nutrition.jpg',
     image_url_female:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1788817325/hunterx/app-assets/nutrition_female.jpg',
   },
+  {
+    title:            'Daily Steps',
+    description:      'Hit your personalized daily step count target',
+    tag:               'STEPS',
+    task_type:         'DAILY_FIXED',
+    xp_reward:         10,
+    xp_partial:        5,
+    allows_partial:    true,
+    target_value:      null, // dynamic — read from users.daily_steps_goal per user (BMI + age, see helpers.js#calculateStepsGoal)
+    target_unit:       'steps',
+    level_target:      'ALL',
+    is_recurring:      true,
+    is_default_daily:  true,
+    is_active:         true,
+    image_url:         'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1789321894/hunterx/app-assets/steps.jpg',
+    image_url_male:    'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1789321894/hunterx/app-assets/steps.jpg',
+    image_url_female:  'https://res.cloudinary.com/sc8zzixt/image/upload/f_auto,q_auto/v1789321895/hunterx/app-assets/steps_female.jpg',
+  },
 ];
 
 // tasks.title has no DB-level unique constraint (it's also used by
@@ -91,8 +114,12 @@ const DAILY_TASKS = [
 // old script used, upgraded to also update fields on re-run instead of
 // just skipping.
 async function seedDailyTasks() {
-  for (const task of DAILY_TASKS) {
-    const existing = await prisma.tasks.findFirst({ where: { title: task.title } });
+  for (const { renamedFrom, ...task } of DAILY_TASKS) {
+    const existing = await prisma.tasks.findFirst({
+      where: renamedFrom
+        ? { title: { in: [task.title, renamedFrom] } }
+        : { title: task.title },
+    });
 
     if (existing) {
       await prisma.tasks.update({ where: { id: existing.id }, data: task });

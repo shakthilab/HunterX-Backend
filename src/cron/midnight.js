@@ -13,7 +13,7 @@
 import cron from 'node-cron';
 import prisma from '../config/prisma.js';
 import { assignDailyTasks } from '../services/taskAssignmentService.js';
-import { getISTDateOnly } from '../utils/helpers.js';
+import { getISTDateOnly, calculateStepsGoal } from '../utils/helpers.js';
 import { info, logError } from '../utils/logger.js';
 
 export async function syncUserAgesForBirthdays(today) {
@@ -25,6 +25,7 @@ export async function syncUserAgesForBirthdays(today) {
       id: true,
       date_of_birth: true,
       age: true,
+      bmi: true,
     },
   });
 
@@ -41,9 +42,18 @@ export async function syncUserAgesForBirthdays(today) {
       }
 
       if (user.age !== calculatedAge) {
+        const data = { age: calculatedAge };
+
+        // daily_steps_goal is age-banded (steps down at 50/65) — keep it
+        // in sync with the birthday instead of only reacting to a manual
+        // profile edit (see helpers.js#calculateStepsGoal).
+        if (user.bmi != null) {
+          data.daily_steps_goal = calculateStepsGoal(user.bmi, calculatedAge);
+        }
+
         await prisma.users.update({
           where: { id: user.id },
-          data: { age: calculatedAge },
+          data,
         });
         updatedCount++;
       }

@@ -17,6 +17,8 @@ import {
   generateTokens,
   calculateBMI,
   calculateProtein,
+  calculateWaterGoal,
+  calculateStepsGoal,
   isValidEmail,
 } from '../utils/helpers.js';
 
@@ -225,6 +227,16 @@ async function processOnboarding(userId, answers) {
 
       userUpdates.bmi                = calculateBMI(finalW, finalH);
       userUpdates.daily_protein_goal = calculateProtein(finalW, activityKey || 'sedentary');
+      userUpdates.daily_water_goal   = calculateWaterGoal(finalW);
+
+      // Steps goal needs age too (question 3) — usually answered in the
+      // same onboarding batch (case 3 above sets userUpdates.age), but
+      // fall back to whatever's already saved for this user in case it
+      // isn't, so this never computes off a null age.
+      const finalAgeForSteps = userUpdates.age !== undefined
+        ? userUpdates.age
+        : (await prisma.users.findUnique({ where: { id: bUserId }, select: { age: true } }))?.age ?? null;
+      userUpdates.daily_steps_goal = calculateStepsGoal(userUpdates.bmi, finalAgeForSteps);
     }
   }
 
@@ -989,6 +1001,8 @@ export async function getCurrentUser(userId) {
       weight_kg:                     true,
       bmi:                           true,
       daily_protein_goal:            true,
+      daily_water_goal:              true,
+      daily_steps_goal:              true,
       fitness_level:                 true,
       dragon_stage:                  true,
       streak_freeze_available:       true,
@@ -1265,6 +1279,20 @@ export async function updateUserProfile(userId, payload = {}) {
 
     const activityKey = activityMap[q9Answer?.answer] || 'sedentary';
     userUpdates.daily_protein_goal = calculateProtein(finalWeight, activityKey);
+  }
+
+  // Recalculate daily_water_goal if weight changed
+  if (weightChanged && finalWeight) {
+    userUpdates.daily_water_goal = calculateWaterGoal(finalWeight);
+  }
+
+  // Recalculate daily_steps_goal if BMI changed (height/weight) or age
+  // changed (birthday) — it's derived from both, so either input moving
+  // means the target needs it.
+  const finalBmi = userUpdates.bmi !== undefined ? userUpdates.bmi : currentUser.bmi;
+  const finalAge = userUpdates.age !== undefined ? userUpdates.age : currentUser.age;
+  if ((userUpdates.bmi !== undefined || userUpdates.age !== undefined) && finalBmi != null) {
+    userUpdates.daily_steps_goal = calculateStepsGoal(finalBmi, finalAge);
   }
 
   // Apply DB updates if any fields changed

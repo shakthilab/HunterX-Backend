@@ -560,6 +560,8 @@ model users {
   weight_kg                                               Float?
   bmi                                                     Float?
   daily_protein_goal                                      Float?
+  daily_water_goal                                        Float?
+  daily_steps_goal                                        Int?
   fitness_level                                           fitness_level              @default(BEGINNER)
   dragon_stage                                            Int                        @default(1)
   streak_freeze_available                                 Boolean                    @default(false)
