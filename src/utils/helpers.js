@@ -1,0 +1,177 @@
+// src/utils/helpers.js — Shared utility functions
+
+import prisma from '../config/prisma.js';
+import jwt    from 'jsonwebtoken';
+import crypto from 'crypto';
+
+BigInt.prototype.toJSON = function () {
+  return this.toString();
+};
+
+// Generate unique Hunter ID e.g. HUN00001
+export async function generateHunterId() {
+  const count  = await prisma.users.count();
+  const number = String(count + 1).padStart(5, '0');
+  const prefix = process.env.HUNTER_ID_PREFIX || 'HUN';
+  return `${prefix}${number}`;
+}
+
+// Generate random 8 character referral code e.g. AX7KPQ2M
+export function generateReferralCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  return Array.from({ length: 8 }, () =>
+    chars[Math.floor(Math.random() * chars.length)]
+  ).join('');
+}
+
+// Generate secure random reset token
+export function generateResetToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// Calculate BMI — weight in kg, height in cm
+export function calculateBMI(weightKg, heightCm) {
+  const heightM = heightCm / 100;
+  return parseFloat((weightKg / (heightM * heightM)).toFixed(2));
+}
+
+// Calculate daily protein goal in grams
+// activityKey must match one of the keys below
+export function calculateProtein(weightKg, activityKey) {
+  const multipliers = {
+    sedentary:      0.8,
+    lightly_active: 1.2,
+    active:         1.6,
+    very_active:    2.0,
+  };
+  const multiplier = multipliers[activityKey] ?? 0.8;
+  return parseFloat((weightKg * multiplier).toFixed(1));
+}
+
+// Calculate daily water intake goal in liters — 35ml per kg body weight,
+// the standard hydration guideline (e.g. 70kg -> 2.45L, 90kg -> 3.15L),
+// floored at 3L. Lighter users (many women, lower-weight men) would
+// otherwise land at 1-2L, well under general hydration advice, so the
+// calculated value only ever raises the target above 3L, never below it.
+export function calculateWaterGoal(weightKg) {
+  return parseFloat(Math.max(weightKg * 0.035, 3).toFixed(2));
+}
+
+// Calculate daily step count goal from BMI + age.
+// BMI buckets (WHO classification): underweight and obese users get a
+// lower, more achievable baseline (harder to sustain high-impact cardio
+// at either extreme), normal/overweight users get progressively higher
+// targets to encourage more activity. Age then lowers the target further
+// — -1,000 at 50+, -2,000 (net) at 65+ — with a 3,000-step floor so it
+// never drops to an unreasonably low number.
+export function calculateStepsGoal(bmi, age) {
+  let base;
+  if (bmi < 18.5)    base = 7000;  // underweight
+  else if (bmi < 25) base = 10000; // normal
+  else if (bmi < 30) base = 11000; // overweight
+  else               base = 6000;  // obese — achievable starting point
+
+  let target = base;
+  if (typeof age === 'number' && Number.isFinite(age)) {
+    if (age >= 65)      target -= 2000;
+    else if (age >= 50) target -= 1000;
+  }
+  return Math.max(target, 3000);
+}
+
+// Today's date in IST (UTC+5:30), as a UTC-midnight Date — safe to store
+// in @db.Date columns (schedule_date) without timezone drift.
+// offsetDays lets callers shift forward/back (e.g. -1 for yesterday).
+export function getISTDateOnly(offsetDays = 0) {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  nowIST.setUTCDate(nowIST.getUTCDate() + offsetDays);
+  return new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()));
+}
+
+// Parse a "YYYY-MM-DD" string into a UTC-midnight Date — same convention
+// @db.Date columns expect, matching getISTDateOnly()/getISTWeekStart().
+// Returns null for anything malformed or an impossible calendar date
+// (e.g. "2026-02-30", which Date.UTC would otherwise silently roll over).
+export function parseDateOnly(str) {
+  if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d)
+    return null;
+  return date;
+}
+
+// Monday of the current IST week, as a UTC-midnight Date — used as the
+// schedule_date "period key" for WEEKLY tasks so a weekly quest has one
+// completion row per week instead of one per day.
+export function getISTWeekStart() {
+  const todayIST = getISTDateOnly();
+  const day = todayIST.getUTCDay(); // 0 = Sunday .. 6 = Saturday
+  const diffToMonday = day === 0 ? 6 : day - 1;
+  const monday = new Date(todayIST);
+  monday.setUTCDate(monday.getUTCDate() - diffToMonday);
+  return monday;
+}
+
+// Validate email format
+export function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// Validate password — minimum 8 characters
+export function isValidPassword(password) {
+  return typeof password === 'string' && password.length >= 8;
+}
+
+// Validate strong password — matches Screen 3 rules
+// At least 8 characters
+// At least one uppercase letter
+// At least one number
+// At least one special character
+export function isStrongPassword(password) {
+  if (typeof password !== 'string') return { valid: false, errors: ['Password is required'] };
+
+  const errors = [];
+
+  if (password.length < 8)
+    errors.push('AT_LEAST_8_CHARACTERS');
+  if (!/[A-Z]/.test(password))
+    errors.push('ONE_UPPERCASE_LETTER');
+  if (!/[0-9]/.test(password))
+    errors.push('ONE_NUMBER');
+  if (!/[^A-Za-z0-9]/.test(password))
+    errors.push('ONE_SPECIAL_CHARACTER');
+
+  return {
+    valid:  errors.length === 0,
+    errors,
+  };
+}
+
+// Generate access + refresh token pair
+export function generateTokens(userId, role, gender) {
+  const payload = { userId, role };
+  if (gender) payload.gender = gender;
+  const accessToken = jwt.sign(
+    payload,
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_ACCESS_EXPIRES || '15m' }
+  );
+  const refreshToken = jwt.sign(
+    { userId },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: process.env.JWT_REFRESH_EXPIRES || '30d' }
+  );
+  return { accessToken, refreshToken };
+}
+
+// Verify access token — returns decoded payload or throws
+export function verifyAccessToken(token) {
+  return jwt.verify(token, process.env.JWT_SECRET);
+}
+
+// Verify refresh token — returns decoded payload or throws
+export function verifyRefreshToken(token) {
+  return jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+}

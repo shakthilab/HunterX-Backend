@@ -1,0 +1,1412 @@
+// src/services/authService.js — All auth and onboarding business logic
+
+import bcrypt           from 'bcryptjs';
+import crypto           from 'crypto';
+import { OAuth2Client } from 'google-auth-library';
+import appleSignin      from 'apple-signin-auth';
+import prisma            from '../config/prisma.js';
+import { mailTransporter } from '../utils/mailer.js';
+import { logError }      from '../utils/logger.js';
+import { assignDailyTasks } from './taskAssignmentService.js';
+import { getWeekStatus }    from './taskService.js';
+import { getISTDateOnly }   from '../utils/helpers.js';
+import {
+  generateHunterId,
+  generateReferralCode,
+  generateResetToken,
+  generateTokens,
+  calculateBMI,
+  calculateProtein,
+  calculateWaterGoal,
+  calculateStepsGoal,
+  isValidEmail,
+} from '../utils/helpers.js';
+
+// Expo/React Native apps get Google ID tokens issued for different
+// client IDs per platform (web/iOS/Android), so verifyIdToken() must
+// accept whichever of them is actually configured as a valid audience.
+const GOOGLE_AUDIENCES = [
+  process.env.GOOGLE_CLIENT_ID_WEB,
+  process.env.GOOGLE_CLIENT_ID_IOS,
+  process.env.GOOGLE_CLIENT_ID_ANDROID,
+  process.env.GOOGLE_CLIENT_ID, // legacy/single-client fallback
+].filter(Boolean);
+
+const googleClient = new OAuth2Client();
+
+// Removes sensitive fields before sending user to client
+// Never expose password_hash, reset_token, or reset_token_expiry
+function sanitizeUser(user) {
+  if (!user) return user;
+  const {
+    password_hash,
+    reset_token,
+    reset_token_expiry,
+    ...safeUser
+  } = user;
+  return safeUser;
+}
+
+// ─────────────────────────────────────────────────────────────
+// INTERNAL — processOnboarding
+// Saves all 10 onboarding answers and updates users table
+// Called inside register/google/apple after user is created
+// ─────────────────────────────────────────────────────────────
+
+async function processOnboarding(userId, answers) {
+  if (!answers || answers.length === 0) return;
+
+  // Validate all answers have questionId and answer
+  for (const a of answers) {
+    if (!a.questionId || a.answer === undefined || a.answer === null) {
+      throw new Error('INVALID_ONBOARDING_ANSWER');
+    }
+    if (a.questionId < 1 || a.questionId > 10) {
+      throw new Error('INVALID_QUESTION_ID');
+    }
+  }
+
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  // Upsert all answers in a single transaction
+  // UNIQUE(user_id, question_id) means re-submitting is safe
+  await prisma.$transaction(
+    answers.map(a =>
+      prisma.user_onboarding_answers.upsert({
+        where: {
+          user_id_question_id: {
+            user_id:     bUserId,
+            question_id: Number(a.questionId),
+          },
+        },
+        create: {
+          user_id:     bUserId,
+          question_id: Number(a.questionId),
+          answer:      String(a.answer),
+        },
+        update: {
+          answer: String(a.answer),
+        },
+      })
+    )
+  );
+
+  // Build users table update from answers
+  const userUpdates = {};
+
+  for (const a of answers) {
+    switch (Number(a.questionId)) {
+
+      case 1:
+        // Hunter Name — stored in users.name, max 24 chars
+        userUpdates.name = String(a.answer).trim().slice(0, 24);
+        break;
+
+      case 2:
+        // Genetic Profile — stored in users.gender
+        // answer values: male / female / other
+        const rawGender = String(a.answer).toLowerCase();
+        const genderMap = {
+          male:   'MALE',
+          female: 'FEMALE',
+          other:  'OTHER',
+        };
+        userUpdates.gender = genderMap[rawGender] || 'OTHER';
+
+        // Q2 Gender-based default avatar assignment (Zane for male, Talon for female)
+        const targetGender = rawGender === 'female' ? 'female' : 'male';
+        const defaultAvatar = await prisma.avatars.findFirst({
+          where: {
+            gender: targetGender,
+            is_default: true,
+            is_active: true,
+          },
+          select: { id: true },
+        });
+
+        if (defaultAvatar) {
+          userUpdates.avatar_id = defaultAvatar.id;
+        }
+        break;
+
+      case 3:
+        // Temporal Age — store age directly in userUpdates, keep date_of_birth as null
+        // answer is age as string e.g. "24"
+        const age = parseInt(a.answer);
+        if (!isNaN(age) && age >= 8 && age <= 80) {
+          userUpdates.age = age;
+        }
+        break;
+
+      case 4:
+        // Height — stored in users.height_cm
+        // answer is height in cm as string e.g. "181"
+        const h = parseFloat(a.answer);
+        if (!isNaN(h) && h >= 80 && h <= 230) {
+          userUpdates.height_cm = h;
+        }
+        break;
+
+      case 5:
+        // Weight — stored in users.weight_kg
+        // answer is weight in kg as string e.g. "75.5"
+        const w = parseFloat(a.answer);
+        if (!isNaN(w) && w >= 40 && w <= 160) {
+          userUpdates.weight_kg = w;
+        }
+        break;
+
+      case 8:
+        // Self Assessment — map rank to fitness_level enum
+        // answer values: e_rank / d_rank / c_rank / b_rank / a_rank / beginner / intermediate / advanced
+        const levelMap = {
+          e_rank: 'BEGINNER',
+          d_rank: 'BEGINNER',
+          c_rank: 'BEGINNER',
+          b_rank: 'INTERMEDIATE',
+          a_rank: 'ADVANCED',
+          beginner: 'BEGINNER',
+          intermediate: 'INTERMEDIATE',
+          advanced: 'ADVANCED',
+        };
+        userUpdates.fitness_level = levelMap[a.answer] || 'BEGINNER';
+        break;
+
+      case 10:
+        // The Oath — all 3 checkboxes confirmed
+        // answer must be "accepted"
+        if (a.answer === 'accepted') {
+          userUpdates.oath_accepted    = true;
+          userUpdates.oath_accepted_at = new Date();
+        }
+        break;
+
+      // Q6 core_drive, Q7 weakness, Q9 training_window
+      // stored only in user_onboarding_answers — no users table update
+      default:
+        break;
+    }
+  }
+
+  // Calculate BMI and protein if height and weight both present
+  const heightAns = answers.find(a => Number(a.questionId) === 4);
+  const weightAns = answers.find(a => Number(a.questionId) === 5);
+  const windowAns = answers.find(a => Number(a.questionId) === 9);
+
+  if (heightAns && weightAns) {
+    const finalH = parseFloat(heightAns.answer);
+    const finalW = parseFloat(weightAns.answer);
+
+    if (!isNaN(finalH) && !isNaN(finalW)) {
+      // Map training window answer to activity key for protein calc
+      const activityMap = {
+        '15min':    'sedentary',
+        '30min':    'lightly_active',
+        '1hr':      'active',
+        '2hr_plus': 'very_active',
+      };
+      const rawWindowAnswer = windowAns?.answer;
+      const activityKey     = activityMap[rawWindowAnswer];
+
+      if (!activityKey) {
+        // Q9 answer didn't match any of the four values the mobile app is
+        // supposed to send. Falling back silently here previously caused
+        // protein goals to be quietly under-calculated (defaulted to
+        // SEDENTARY/0.8x) with no trace. Log loudly — with the actual
+        // unmapped value and the affected user — so this is caught
+        // immediately instead of corrupting data unnoticed. We still fall
+        // back to keep registration from failing on a bad enum value.
+        logError(
+          `Q9_ACTIVITY_MAP_MISMATCH: unrecognized training_window answer ` +
+          `${JSON.stringify(rawWindowAnswer)} for user ${bUserId}. ` +
+          `Expected one of "15min" | "30min" | "1hr" | "2hr_plus". ` +
+          `Defaulting to SEDENTARY (0.8x) — daily_protein_goal for this ` +
+          `user should be recalculated once the mismatch is fixed.`
+        );
+      }
+
+      userUpdates.bmi                = calculateBMI(finalW, finalH);
+      userUpdates.daily_protein_goal = calculateProtein(finalW, activityKey || 'sedentary');
+      userUpdates.daily_water_goal   = calculateWaterGoal(finalW);
+
+      // Steps goal needs age too (question 3) — usually answered in the
+      // same onboarding batch (case 3 above sets userUpdates.age), but
+      // fall back to whatever's already saved for this user in case it
+      // isn't, so this never computes off a null age.
+      const finalAgeForSteps = userUpdates.age !== undefined
+        ? userUpdates.age
+        : (await prisma.users.findUnique({ where: { id: bUserId }, select: { age: true } }))?.age ?? null;
+      userUpdates.daily_steps_goal = calculateStepsGoal(userUpdates.bmi, finalAgeForSteps);
+    }
+  }
+
+  // Mark onboarding complete
+  userUpdates.onboarding_done = true;
+  userUpdates.onboarding_step = 10;
+
+  // Single update to users table — all calculated fields at once
+  await prisma.users.update({
+    where: { id: bUserId },
+    data:  userUpdates,
+  });
+
+  // Trigger B of the automatic task-assignment system (see
+  // taskAssignmentService.js) — this is the one place all onboarding
+  // flows (register, Google, Apple, completeOnboarding) funnel through,
+  // so a new user gets today's tasks immediately instead of waiting for
+  // the nightly cron. Never let an assignment hiccup fail onboarding —
+  // the request-time fallback (trigger C) covers the gap if this fails.
+  try {
+    await assignDailyTasks(bUserId, getISTDateOnly());
+  } catch (err) {
+    logError(`Task assignment on onboarding failed for user ${bUserId}: ${err.message}`);
+  }
+
+  // Referral payout — the referrer gets 50 XP once (and only once) the
+  // referred user finishes onboarding, not at signup. This is the same
+  // funnel point as the task-assignment trigger above, so it fires no
+  // matter which auth path (register/Google/Apple/completeOnboarding)
+  // got them here. xp_awarded on the referrals row makes this idempotent.
+  try {
+    await awardReferralXpIfEligible(bUserId);
+  } catch (err) {
+    logError(`Referral XP payout failed for referred user ${bUserId}: ${err.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// INTERNAL — awardReferralXpIfEligible
+// Pays the REFERRER 50 XP the moment the user they referred
+// completes onboarding. No-op if this user wasn't referred, or
+// the referral already got its XP.
+// ─────────────────────────────────────────────────────────────
+
+const REFERRAL_XP_REWARD = 50;
+
+async function awardReferralXpIfEligible(referredUserId) {
+  const referral = await prisma.referrals.findFirst({
+    where: { referred_id: referredUserId, xp_awarded: false },
+  });
+  if (!referral) return;
+
+  await prisma.$transaction(async (tx) => {
+    // Re-check inside the transaction so two concurrent onboarding
+    // completions for the same user can't double-pay the referrer.
+    const { count } = await tx.referrals.updateMany({
+      where: { id: referral.id, xp_awarded: false },
+      data:  { xp_awarded: true },
+    });
+    if (count === 0) return;
+
+    await tx.xp_transactions.create({
+      data: {
+        user_id: referral.referrer_id,
+        amount:  REFERRAL_XP_REWARD,
+        reason:  'REFERRAL: invited friend completed onboarding',
+      },
+    });
+
+    await tx.user_progression.upsert({
+      where:  { user_id: referral.referrer_id },
+      create: { user_id: referral.referrer_id, total_xp: REFERRAL_XP_REWARD },
+      update: { total_xp: { increment: REFERRAL_XP_REWARD } },
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// INTERNAL — createBaseUser
+// Creates the user record, auth_provider, and user_progression
+// Used by all three auth methods
+// ─────────────────────────────────────────────────────────────
+
+async function createBaseUser({ name, email, provider, providerId, passwordHash, referralCode }) {
+  // Resolve the inviter's referral code, if one was passed in. A
+  // missing/invalid/unknown code is never fatal to signup — it just
+  // means this account isn't attributed to anyone.
+  let referrer = null;
+  if (referralCode) {
+    referrer = await prisma.users.findUnique({
+      where: { referral_code: referralCode.trim().toUpperCase() },
+    });
+  }
+
+  const user = await prisma.users.create({
+    data: {
+      hunter_id:     await generateHunterId(),
+      name:          name?.trim() || 'Hunter',
+      email:         email || null,
+      password_hash: passwordHash || null,
+      referral_code: generateReferralCode(),
+      referred_by:   referrer?.id || null,
+      role:          'USER',
+    },
+  });
+
+  await prisma.auth_providers.create({
+    data: {
+      user_id:     user.id,
+      provider,
+      provider_id: providerId,
+    },
+  });
+
+  await prisma.user_progression.create({
+    data: { user_id: user.id },
+  });
+
+  // Record the referral. XP for the referrer is paid out later, once
+  // this new user actually completes onboarding (see processOnboarding)
+  // — not here — so a code can't be farmed for XP with throwaway
+  // accounts that never activate.
+  if (referrer) {
+    await prisma.referrals.create({
+      data: {
+        referrer_id: referrer.id,
+        referred_id: user.id,
+      },
+    });
+  }
+
+  return user;
+}
+
+// ─────────────────────────────────────────────────────────────
+// SEND OTP FOR EMAIL VERIFICATION
+// ─────────────────────────────────────────────────────────────
+
+export async function sendOtp(email) {
+  // Step 1 — Check email not already registered
+  const existing = await prisma.users.findUnique({ where: { email } });
+  if (existing) throw new Error('email is already exist');
+
+  // Step 2 — Generate 6 digit OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+  // Step 3 — Delete any existing unused OTPs for this email
+  await prisma.email_otps.deleteMany({
+    where: { email },
+  });
+
+  // Step 4 — Save new OTP to DB with 10 minute expiry
+  await prisma.email_otps.create({
+    data: {
+      email,
+      otp,
+      verified:   false,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000),
+    },
+  });
+
+  // Step 5 — Send OTP email via Gmail SMTP (Nodemailer)
+  try {
+    await mailTransporter.sendMail({
+      from:    process.env.EMAIL_FROM || process.env.GMAIL_USER,
+      to:      email,
+      subject: 'Your HunterX verification code',
+      html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width">
+      </head>
+      <body style="
+        margin: 0;
+        padding: 0;
+        background-color: #0a0a0a;
+        font-family: Arial, sans-serif;
+      ">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" style="padding: 40px 20px;">
+              <table width="480" cellpadding="0" cellspacing="0" style="
+                background-color: #111111;
+                border-radius: 8px;
+                border: 1px solid #222222;
+                overflow: hidden;
+              ">
+                <!-- Header -->
+                <tr>
+                  <td style="
+                    background-color: #000000;
+                    padding: 32px;
+                    text-align: center;
+                    border-bottom: 1px solid #222222;
+                  ">
+                    <h1 style="
+                      margin: 0;
+                      color: #ffffff;
+                      font-size: 24px;
+                      font-style: italic;
+                      letter-spacing: 4px;
+                    ">HUNTERX</h1>
+                    <p style="
+                      margin: 8px 0 0;
+                      color: #555555;
+                      font-size: 12px;
+                      letter-spacing: 2px;
+                      text-transform: uppercase;
+                    ">The system awaits</p>
+                  </td>
+                </tr>
+
+                <!-- Body -->
+                <tr>
+                  <td style="padding: 40px 32px; text-align: center;">
+                    <p style="
+                      margin: 0 0 8px;
+                      color: #888888;
+                      font-size: 13px;
+                      letter-spacing: 1px;
+                      text-transform: uppercase;
+                    ">Your verification code</p>
+
+                    <p style="
+                      margin: 0 0 32px;
+                      color: #555555;
+                      font-size: 14px;
+                      line-height: 1.6;
+                    ">Enter this code to verify your email and begin your journey as a Hunter.</p>
+
+                    <!-- OTP Box -->
+                    <div style="
+                      background-color: #000000;
+                      border: 1px solid #333333;
+                      border-radius: 8px;
+                      padding: 24px;
+                      margin: 0 0 32px;
+                      display: inline-block;
+                      width: 100%;
+                    ">
+                      <p style="
+                        margin: 0;
+                        color: #ffffff;
+                        font-size: 48px;
+                        font-weight: bold;
+                        letter-spacing: 16px;
+                        font-family: 'Courier New', monospace;
+                      ">${otp}</p>
+                    </div>
+
+                    <!-- Expiry warning -->
+                    <p style="
+                      margin: 0 0 8px;
+                      color: #E8A020;
+                      font-size: 13px;
+                      font-weight: bold;
+                    ">⚠ This code expires in 10 minutes</p>
+
+                    <p style="
+                      margin: 0;
+                      color: #555555;
+                      font-size: 12px;
+                    ">If you did not request this code, ignore this email.</p>
+                  </td>
+                </tr>
+
+                <!-- Footer -->
+                <tr>
+                  <td style="
+                    padding: 20px 32px;
+                    text-align: center;
+                    border-top: 1px solid #222222;
+                  ">
+                    <p style="
+                      margin: 0;
+                      color: #333333;
+                      font-size: 11px;
+                    ">HunterX by Gymgasm · Do not reply to this email</p>
+                  </td>
+                </tr>
+
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `,
+    });
+  } catch (err) {
+    logError(`Failed to send OTP email to ${email}: ${err.message || err}`);
+    throw new Error('Failed to send verification email. Please try again.');
+  }
+
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// VERIFY OTP
+// ─────────────────────────────────────────────────────────────
+
+export async function verifyOtp(email, otp) {
+  // Step 1 — Find the latest unverified unexpired OTP for this email
+  const record = await prisma.email_otps.findFirst({
+    where: {
+      email,
+      verified:   false,
+      expires_at: { gt: new Date() },
+    },
+    orderBy: { created_at: 'desc' },
+  });
+
+  // Step 2 — If no record found, OTP is invalid or expired
+  if (!record) throw new Error('INVALID_OTP');
+
+  // Step 3 — Check OTP matches exactly
+  if (record.otp !== otp.trim()) throw new Error('INVALID_OTP');
+
+  // Step 4 — Mark as verified
+  await prisma.email_otps.update({
+    where: { id: record.id },
+    data:  { verified: true },
+  });
+
+  // Step 5 — Return true
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// REGISTER WITH EMAIL AND PASSWORD
+// ─────────────────────────────────────────────────────────────
+
+export async function registerWithEmail(name, email, password, onboarding = [], referralCode = null) {
+  // Check OTP was verified for this email before allowing registration
+  const otpRecord = await prisma.email_otps.findFirst({
+    where: {
+      email,
+      verified:   true,
+      expires_at: { gt: new Date() },
+    },
+    orderBy: { created_at: 'desc' },
+  });
+
+  if (!otpRecord) throw new Error('EMAIL_NOT_VERIFIED');
+
+  // Check email not already taken
+  const existing = await prisma.users.findUnique({ where: { email } });
+  if (existing) throw new Error('EMAIL_EXISTS');
+
+  // Hash password
+  const salt         = await bcrypt.genSalt(12);
+  const passwordHash = await bcrypt.hash(password, salt);
+
+  // Create user
+  const user = await createBaseUser({
+    name,
+    email,
+    provider:     'EMAIL',
+    providerId:   email,
+    passwordHash,
+    referralCode,
+  });
+
+  // Save onboarding answers and calculate profile fields
+  await processOnboarding(user.id, onboarding);
+
+  // Fetch updated user after onboarding updates
+  const updatedUser = await prisma.users.findUnique({
+    where: { id: user.id },
+  });
+
+  const tokens = generateTokens(updatedUser.id.toString(), updatedUser.role, updatedUser.gender);
+
+  // Clean up OTP record — no longer needed after registration
+  await prisma.email_otps.deleteMany({ where: { email } });
+
+  return {
+    user:   sanitizeUser(updatedUser),
+    ...tokens,
+    isNew:  true,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// LOGIN WITH EMAIL AND PASSWORD
+// No onboarding — existing users go straight to home
+// ─────────────────────────────────────────────────────────────
+
+export async function loginWithEmail(email, password) {
+  const user = await prisma.users.findUnique({ where: { email } });
+
+  if (!user || !user.password_hash) throw new Error('INVALID_CREDENTIALS');
+  if (user.is_banned) throw new Error('ACCOUNT_BANNED');
+
+  const valid = await bcrypt.compare(password, user.password_hash);
+  if (!valid) throw new Error('INVALID_CREDENTIALS');
+
+  const tokens = generateTokens(user.id.toString(), user.role, user.gender);
+
+  return {
+    user:  sanitizeUser(user),
+    ...tokens,
+    isNew: !user.onboarding_done,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONTINUE WITH GOOGLE
+// New users — create account + save onboarding
+// Existing users — log in, skip onboarding
+// ─────────────────────────────────────────────────────────────
+
+export async function loginWithGoogle(idToken, onboarding = [], referralCode = null) {
+  if (GOOGLE_AUDIENCES.length === 0) throw new Error('GOOGLE_NOT_CONFIGURED');
+
+  // Verify Google token — throws for expired/malformed/wrong-audience tokens
+  let ticket;
+  try {
+    ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: GOOGLE_AUDIENCES,
+    });
+  } catch {
+    throw new Error('INVALID_GOOGLE_TOKEN');
+  }
+
+  const payload  = ticket.getPayload();
+  const googleId = payload.sub;
+  const email    = payload.email;
+  const name     = payload.name || 'Hunter';
+
+  // Check by Google provider ID
+  const existingProvider = await prisma.auth_providers.findFirst({
+    where: { provider: 'GOOGLE', provider_id: googleId },
+  });
+
+  if (existingProvider) {
+    // Existing Google user — log in only, no onboarding
+    const user = await prisma.users.findUnique({
+      where: { id: existingProvider.user_id },
+    });
+    if (!user || user.is_banned) throw new Error('ACCOUNT_BANNED');
+    const tokens = generateTokens(user.id.toString(), user.role, user.gender);
+    return { user: sanitizeUser(user), ...tokens, isNew: false };
+  }
+
+  // Check if email already registered (e.g. with email+password)
+  if (email) {
+    const existingByEmail = await prisma.users.findUnique({ where: { email } });
+    if (existingByEmail) {
+      // Link Google to existing account
+      await prisma.auth_providers.create({
+        data: {
+          user_id:     existingByEmail.id,
+          provider:    'GOOGLE',
+          provider_id: googleId,
+        },
+      });
+      // Save onboarding if not yet done
+      if (onboarding.length > 0 && !existingByEmail.onboarding_done) {
+        await processOnboarding(existingByEmail.id, onboarding);
+      }
+      const tokens = generateTokens(existingByEmail.id.toString(), existingByEmail.role, existingByEmail.gender);
+      return { user: sanitizeUser(existingByEmail), ...tokens, isNew: false, linked: true };
+    }
+  }
+
+  // Brand new user via Google
+  const user = await createBaseUser({
+    name,
+    email,
+    provider:   'GOOGLE',
+    providerId: googleId,
+    referralCode,
+  });
+
+  await processOnboarding(user.id, onboarding);
+
+  const updatedUser = await prisma.users.findUnique({ where: { id: user.id } });
+  const tokens      = generateTokens(updatedUser.id.toString(), updatedUser.role, updatedUser.gender);
+
+  return { user: sanitizeUser(updatedUser), ...tokens, isNew: true };
+}
+
+// ─────────────────────────────────────────────────────────────
+// CONTINUE WITH APPLE
+// Apple only provides name and email on the VERY FIRST login
+// Name comes from onboarding Q1 answer — more reliable
+// ─────────────────────────────────────────────────────────────
+
+export async function loginWithApple(idToken, nonce, onboarding = [], referralCode = null) {
+  // Verify Apple token
+  const appleUser = await appleSignin.verifyIdToken(idToken, {
+    audience:         process.env.APPLE_CLIENT_ID,
+    ignoreExpiration: false,
+    ...(nonce && { nonce }),
+  });
+
+  const appleId = appleUser.sub;
+  const email   = appleUser.email || null;
+
+  // Check by Apple provider ID
+  const existingProvider = await prisma.auth_providers.findFirst({
+    where: { provider: 'APPLE', provider_id: appleId },
+  });
+
+  if (existingProvider) {
+    const user = await prisma.users.findUnique({
+      where: { id: existingProvider.user_id },
+    });
+    if (!user || user.is_banned) throw new Error('ACCOUNT_BANNED');
+    const tokens = generateTokens(user.id.toString(), user.role, user.gender);
+    return { user: sanitizeUser(user), ...tokens, isNew: false };
+  }
+
+  // Check by email
+  if (email) {
+    const existingByEmail = await prisma.users.findUnique({ where: { email } });
+    if (existingByEmail) {
+      await prisma.auth_providers.create({
+        data: {
+          user_id:     existingByEmail.id,
+          provider:    'APPLE',
+          provider_id: appleId,
+        },
+      });
+      if (onboarding.length > 0 && !existingByEmail.onboarding_done) {
+        await processOnboarding(existingByEmail.id, onboarding);
+      }
+      const tokens = generateTokens(existingByEmail.id.toString(), existingByEmail.role, existingByEmail.gender);
+      return { user: sanitizeUser(existingByEmail), ...tokens, isNew: false, linked: true };
+    }
+  }
+
+  // Brand new Apple user
+  // Get name from Q1 answer since Apple only gives it once
+  const nameFromOnboarding = onboarding.find(a => Number(a.questionId) === 1)?.answer
+                             || 'Hunter';
+
+  const user = await createBaseUser({
+    name:       nameFromOnboarding,
+    email,
+    provider:   'APPLE',
+    providerId: appleId,
+    referralCode,
+  });
+
+  await processOnboarding(user.id, onboarding);
+
+  const updatedUser = await prisma.users.findUnique({ where: { id: user.id } });
+  const tokens      = generateTokens(updatedUser.id.toString(), updatedUser.role, updatedUser.gender);
+
+  return { user: sanitizeUser(updatedUser), ...tokens, isNew: true };
+}
+
+// ─────────────────────────────────────────────────────────────
+// REFRESH ACCESS TOKEN
+// ─────────────────────────────────────────────────────────────
+
+export async function refreshAccessToken(refreshToken) {
+  const { verifyRefreshToken } = await import('../utils/helpers.js');
+  const decoded = verifyRefreshToken(refreshToken);
+
+  const userId = BigInt(decoded.userId);
+  const user = await prisma.users.findUnique({ where: { id: userId } });
+  if (!user)           throw new Error('USER_NOT_FOUND');
+  if (user.is_banned)  throw new Error('ACCOUNT_BANNED');
+
+  const tokens = generateTokens(user.id.toString(), user.role, user.gender);
+  return { user: sanitizeUser(user), ...tokens };
+}
+
+// ─────────────────────────────────────────────────────────────
+// FORGOT PASSWORD
+// Always returns true — prevents user enumeration
+// ─────────────────────────────────────────────────────────────
+
+export async function forgotPassword(email) {
+  // Check email exists in DB before sending reset email
+  const user = await prisma.users.findUnique({ where: { email } });
+  if (!user) throw new Error('EMAIL_NOT_FOUND');
+
+  // Only works for email+password accounts (not Google/Apple)
+  const emailProvider = await prisma.auth_providers.findFirst({
+    where: { user_id: user.id, provider: 'EMAIL' },
+  });
+  if (!emailProvider) throw new Error('SOCIAL_ACCOUNT');
+
+  // If there is already an active (unexpired) reset token, enforce cooldown
+  if (user.reset_token && user.reset_token_expiry && user.reset_token_expiry > new Date()) {
+    const remainingMs = user.reset_token_expiry.getTime() - Date.now();
+    const remainingMins = Math.ceil(remainingMs / (60 * 1000));
+    const err = new Error('RESET_COOLDOWN');
+    err.remainingMinutes = remainingMins;
+    throw err;
+  }
+
+  const resetToken  = generateResetToken();
+  const resetExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  await prisma.users.update({
+    where: { id: user.id },
+    data: {
+      reset_token:        resetToken,
+      reset_token_expiry: resetExpiry,
+    },
+  });
+
+  const resetLink = `${process.env.APP_URL}/reset-password?token=${resetToken}`;
+
+  await mailTransporter.sendMail({
+    from:    process.env.EMAIL_FROM || process.env.GMAIL_USER,
+    to:      email,
+    subject: 'Reset your HunterX Secret Key',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="margin:0;padding:0;background-color:#0a0a0a;font-family:Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" style="padding:40px 20px;">
+              <table width="480" cellpadding="0" cellspacing="0" style="background-color:#111111;border-radius:8px;border:1px solid #222222;">
+
+                <tr>
+                  <td style="background-color:#000000;padding:32px;text-align:center;border-bottom:1px solid #222222;">
+                    <h1 style="margin:0;color:#ffffff;font-size:24px;font-style:italic;letter-spacing:4px;">HUNTERX</h1>
+                    <p style="margin:8px 0 0;color:#555555;font-size:12px;letter-spacing:2px;text-transform:uppercase;">The system awaits</p>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:40px 32px;text-align:center;">
+                    <p style="margin:0 0 8px;color:#E8A020;font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;">Lost Access</p>
+                    <h2 style="margin:0 0 16px;color:#ffffff;font-size:28px;font-weight:bold;">Recover your account</h2>
+                    <p style="margin:0 0 32px;color:#555555;font-size:14px;line-height:1.6;">
+                      Click the button below to reset your Secret Key.<br>
+                      This link expires in 10 minutes.
+                    </p>
+
+                    <a href="${resetLink}" style="
+                      display:inline-block;
+                      background-color:#ffffff;
+                      color:#000000;
+                      text-decoration:none;
+                      font-size:14px;
+                      font-weight:bold;
+                      letter-spacing:2px;
+                      text-transform:uppercase;
+                      padding:16px 40px;
+                      border-radius:4px;
+                      margin-bottom:32px;
+                    ">SET NEW PASSWORD</a>
+
+                    <p style="margin:0 0 8px;color:#E8A020;font-size:12px;">
+                      Link expires in 10 minutes
+                    </p>
+                    <p style="margin:0;color:#333333;font-size:12px;">
+                      If you did not request this, ignore this email.<br>
+                      Check your spam folder if you don't receive it within 2 minutes.
+                    </p>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:20px 32px;text-align:center;border-top:1px solid #222222;">
+                    <p style="margin:0;color:#333333;font-size:11px;">HunterX by Gymgasm · Do not reply to this email</p>
+                  </td>
+                </tr>
+
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `,
+  });
+
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// RESET PASSWORD
+// ─────────────────────────────────────────────────────────────
+
+export async function resetPassword(resetToken, newPassword) {
+
+  // Find user with valid unexpired reset token
+  const user = await prisma.users.findFirst({
+    where: {
+      reset_token:        resetToken,
+      reset_token_expiry: { gt: new Date() },
+    },
+  });
+
+  if (!user) throw new Error('INVALID_OR_EXPIRED_TOKEN');
+
+  // Hash new password
+  const salt    = await bcrypt.genSalt(12);
+  const newHash = await bcrypt.hash(newPassword, salt);
+
+  // Update password and clear reset token
+  await prisma.users.update({
+    where: { id: user.id },
+    data: {
+      password_hash:      newHash,
+      reset_token:        null,
+      reset_token_expiry: null,
+    },
+  });
+
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// COMPLETE ONBOARDING
+// For an already-authenticated user whose onboarding isn't done
+// yet — e.g. a Google/Apple account created straight from the
+// Login screen, before the onboarding wizard ran. Attaches the
+// wizard answers to the existing account instead of creating a
+// new one or issuing new tokens.
+// ─────────────────────────────────────────────────────────────
+
+export async function completeOnboarding(userId, onboarding = []) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  const user = await prisma.users.findUnique({ where: { id: bUserId } });
+  if (!user) throw new Error('USER_NOT_FOUND');
+  if (user.onboarding_done) throw new Error('ONBOARDING_ALREADY_DONE');
+
+  await processOnboarding(bUserId, onboarding);
+
+  return getCurrentUser(bUserId);
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET CURRENT USER
+// ─────────────────────────────────────────────────────────────
+
+export async function getCurrentUser(userId) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+  const user = await prisma.users.findUnique({
+    where: { id: bUserId },
+    select: {
+      id:                            true,
+      hunter_id:                     true,
+      name:                          true,
+      email:                         true,
+      avatar_id:                     true,
+      role:                          true,
+      onboarding_done:               true,
+      onboarding_step:               true,
+      is_banned:                     true,
+      referral_code:                 true,
+      referred_by:                   true,
+      gender:                        true,
+      date_of_birth:                 true,
+      age:                           true,
+      height_cm:                     true,
+      weight_kg:                     true,
+      bmi:                           true,
+      daily_protein_goal:            true,
+      daily_water_goal:              true,
+      daily_steps_goal:              true,
+      fitness_level:                 true,
+      dragon_stage:                  true,
+      streak_freeze_available:       true,
+      streak_freeze_used_this_month: true,
+      oath_accepted:                 true,
+      oath_accepted_at:              true,
+      location_visible:              true,
+      created_at:                    true,
+      updated_at:                    true,
+      user_progression:              true,
+      auth_providers: {
+        select: {
+          provider: true,
+        },
+      },
+    },
+  });
+
+  if (!user) return null;
+
+  const { auth_providers, ...flatUser } = user;
+  flatUser.auth_provider = auth_providers?.[0]?.provider || null;
+  flatUser.week_status   = await getWeekStatus(bUserId);
+
+  if (flatUser.user_progression) {
+    const currentLvlNum = flatUser.user_progression.current_level || 1;
+    const nextLvlNum    = currentLvlNum + 1;
+
+    const levelRows = await prisma.levels.findMany({
+      where: { level_number: { in: [currentLvlNum, nextLvlNum] } },
+    });
+
+    const currentLevelRow = levelRows.find(l => l.level_number === currentLvlNum);
+    const nextLevelRow    = levelRows.find(l => l.level_number === nextLvlNum);
+
+    flatUser.user_progression = {
+      ...flatUser.user_progression,
+      current_level_name:     currentLevelRow?.title || null,
+      current_level_title:    currentLevelRow?.title || null,
+      rank_name:              currentLevelRow?.rank_name || null,
+      rank:                   currentLevelRow?.rank_name || null,
+      next_level_rank:        nextLevelRow?.rank_name || null,
+      next_level_rank_name:   nextLevelRow?.rank_name || null,
+      next_level_xp_required: nextLevelRow?.xp_required ?? null,
+      next_level_required_xp: nextLevelRow?.xp_required ?? null,
+    };
+  }
+
+  const STREAK_BADGE_DAYS_MAP = {
+    'Ember Vow': 7,
+    'Iron Resolve': 14,
+    'Shadow Oath': 30,
+    'Phantom Discipline': 60,
+    'Sovereign Will': 90,
+    'Void Ascendant': 200,
+    'Eternal Hunter': 365,
+  };
+
+  const rawBadges = await prisma.user_badges.findMany({
+    where: { user_id: bUserId },
+    orderBy: { earned_at: 'asc' },
+    include: {
+      badges: true,
+    },
+  });
+
+  flatUser.badges = rawBadges.map((ub) => {
+    const milestoneDays = STREAK_BADGE_DAYS_MAP[ub.badges.name] ?? null;
+    const badgeType = (ub.badges.badge_type === 'STREAK' || milestoneDays !== null)
+      ? 'STREAK_MILESTONE'
+      : ub.badges.badge_type;
+
+    return {
+      badge_id:       Number(ub.badge_id),
+      name:           ub.badges.name,
+      description:    ub.badges.description || null,
+      image_url:      ub.badges.image_url || null,
+      badge_type:     badgeType,
+      earned_at:      ub.earned_at,
+      milestone_days: milestoneDays,
+    };
+  });
+
+  return flatUser;
+}
+
+// ── Update User Profile ──────────────────────────────────────
+// Updates editable profile fields: name, gender, birthday/date_of_birth,
+// height_cm, weight_kg, avatar_id.
+// Automatically recalculates BMI if height or weight changes, and
+// recalculates daily_protein_goal using saved onboarding activity preference
+// whenever weight changes. Manual setting of protein is strictly disallowed.
+export async function updateUserProfile(userId, payload = {}) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  const currentUser = await prisma.users.findUnique({
+    where: { id: bUserId },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      gender: true,
+      date_of_birth: true,
+      age: true,
+      height_cm: true,
+      weight_kg: true,
+      bmi: true,
+      daily_protein_goal: true,
+      avatar_id: true,
+    },
+  });
+
+  if (!currentUser) {
+    throw new Error('USER_NOT_FOUND');
+  }
+
+  const userUpdates = {};
+  const { name, email, gender, birthday, date_of_birth, height, height_cm, weight, weight_kg, avatar_id } = payload;
+
+  // 0. Email
+  if (email !== undefined && email !== null) {
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!isValidEmail(normalizedEmail)) {
+      throw new Error('INVALID_EMAIL');
+    }
+    if (currentUser.email !== normalizedEmail) {
+      const existingUser = await prisma.users.findFirst({
+        where: {
+          email: normalizedEmail,
+          id: { not: bUserId },
+        },
+      });
+      if (existingUser) {
+        throw new Error('EMAIL_EXISTS');
+      }
+      userUpdates.email = normalizedEmail;
+    }
+  }
+
+  // 1. Name
+  if (name !== undefined && name !== null) {
+    const trimmed = String(name).trim();
+    if (!trimmed) {
+      throw new Error('INVALID_NAME');
+    }
+    if (trimmed.length > 100) {
+      throw new Error('NAME_TOO_LONG');
+    }
+    userUpdates.name = trimmed;
+  }
+
+  // 2. Gender
+  if (gender !== undefined && gender !== null) {
+    const g = String(gender).toUpperCase();
+    const validGenders = ['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'];
+    if (!validGenders.includes(g)) {
+      throw new Error('INVALID_GENDER');
+    }
+    userUpdates.gender = g;
+  }
+
+  // 3. Birthday / Date of birth
+  const dobInput = birthday !== undefined ? birthday : date_of_birth;
+  if (dobInput !== undefined && dobInput !== null) {
+    let dob = null;
+    if (typeof dobInput === 'string') {
+      const str = dobInput.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        const [y, m, d] = str.split('-').map(Number);
+        dob = new Date(Date.UTC(y, m - 1, d));
+      } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) {
+        const [d, m, y] = str.split('/').map(Number);
+        dob = new Date(Date.UTC(y, m - 1, d));
+      } else if (/^\d{2}\/\d{2}\/\d{2}$/.test(str)) {
+        const [d, m, y] = str.split('/').map(Number);
+        const fullYear = y >= 50 ? 1900 + y : 2000 + y;
+        dob = new Date(Date.UTC(fullYear, m - 1, d));
+      } else {
+        dob = new Date(str);
+      }
+    } else if (dobInput instanceof Date) {
+      dob = dobInput;
+    }
+
+    if (!dob || isNaN(dob.getTime())) {
+      throw new Error('INVALID_BIRTHDAY');
+    }
+
+    const today = new Date();
+    if (dob > today) {
+      throw new Error('BIRTHDAY_IN_FUTURE');
+    }
+
+    let age = today.getUTCFullYear() - dob.getUTCFullYear();
+    const monthDiff = today.getUTCMonth() - dob.getUTCMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && today.getUTCDate() < dob.getUTCDate())) {
+      age--;
+    }
+
+    if (age < 0 || age > 120) {
+      throw new Error('INVALID_AGE');
+    }
+
+    userUpdates.date_of_birth = dob;
+    userUpdates.age = age;
+  }
+
+  // 4. Height (cm)
+  const hInput = height !== undefined ? height : height_cm;
+  let heightChanged = false;
+  if (hInput !== undefined && hInput !== null) {
+    const h = parseFloat(hInput);
+    if (isNaN(h) || h < 50 || h > 300) {
+      throw new Error('INVALID_HEIGHT');
+    }
+    userUpdates.height_cm = h;
+    heightChanged = true;
+  }
+
+  // 5. Weight (kg)
+  const wInput = weight !== undefined ? weight : weight_kg;
+  let weightChanged = false;
+  if (wInput !== undefined && wInput !== null) {
+    const w = parseFloat(wInput);
+    if (isNaN(w) || w < 20 || w > 500) {
+      throw new Error('INVALID_WEIGHT');
+    }
+    userUpdates.weight_kg = w;
+    weightChanged = true;
+  }
+
+  // 6. Avatar ID
+  const avInput = avatar_id !== undefined ? avatar_id : payload.avatarId;
+  if (avInput !== undefined && avInput !== null) {
+    const avId = parseInt(avInput);
+    if (isNaN(avId) || avId <= 0) {
+      throw new Error('INVALID_AVATAR');
+    }
+    const avatar = await prisma.avatars.findUnique({
+      where: { id: BigInt(avId) },
+    });
+    if (!avatar || !avatar.is_active) {
+      throw new Error('AVATAR_NOT_FOUND');
+    }
+    userUpdates.avatar_id = BigInt(avId);
+  }
+
+  // Final height and weight for BMI and Protein goal calculation
+  const finalHeight = userUpdates.height_cm !== undefined ? userUpdates.height_cm : currentUser.height_cm;
+  const finalWeight = userUpdates.weight_kg !== undefined ? userUpdates.weight_kg : currentUser.weight_kg;
+
+  // Recalculate BMI if height or weight changed and both final values exist
+  if ((heightChanged || weightChanged) && finalHeight && finalWeight) {
+    userUpdates.bmi = calculateBMI(finalWeight, finalHeight);
+  }
+
+  // Recalculate daily_protein_goal if weight changed
+  if (weightChanged && finalWeight) {
+    const q9Answer = await prisma.user_onboarding_answers.findUnique({
+      where: {
+        user_id_question_id: {
+          user_id: bUserId,
+          question_id: 9,
+        },
+      },
+    });
+
+    const activityMap = {
+      '15min':    'sedentary',
+      '30min':    'lightly_active',
+      '1hr':      'active',
+      '2hr_plus': 'very_active',
+    };
+
+    const activityKey = activityMap[q9Answer?.answer] || 'sedentary';
+    userUpdates.daily_protein_goal = calculateProtein(finalWeight, activityKey);
+  }
+
+  // Recalculate daily_water_goal if weight changed
+  if (weightChanged && finalWeight) {
+    userUpdates.daily_water_goal = calculateWaterGoal(finalWeight);
+  }
+
+  // Recalculate daily_steps_goal if BMI changed (height/weight) or age
+  // changed (birthday) — it's derived from both, so either input moving
+  // means the target needs it.
+  const finalBmi = userUpdates.bmi !== undefined ? userUpdates.bmi : currentUser.bmi;
+  const finalAge = userUpdates.age !== undefined ? userUpdates.age : currentUser.age;
+  if ((userUpdates.bmi !== undefined || userUpdates.age !== undefined) && finalBmi != null) {
+    userUpdates.daily_steps_goal = calculateStepsGoal(finalBmi, finalAge);
+  }
+
+  // Apply DB updates if any fields changed
+  if (Object.keys(userUpdates).length > 0) {
+    userUpdates.updated_at = new Date();
+    await prisma.users.update({
+      where: { id: bUserId },
+      data: userUpdates,
+    });
+  }
+
+  return await getCurrentUser(bUserId);
+}
+
+// ── Get All Active Avatars ──────────────────────────────────
+export async function getAvatars() {
+  const avatars = await prisma.avatars.findMany({
+    where: { is_active: true },
+    orderBy: { id: 'asc' },
+    select: {
+      id: true,
+      name: true,
+      image_url: true,
+      gender: true,
+      is_default: true,
+      unlock_at_level: true,
+    },
+  });
+
+  return avatars;
+}
+
+// ── Update User Avatar ──────────────────────────────────────
+export async function updateUserAvatar(userId, avatarId) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+  if (avatarId === undefined || avatarId === null) {
+    throw new Error('AVATAR_REQUIRED');
+  }
+
+  const avId = parseInt(avatarId);
+  if (isNaN(avId) || avId <= 0) {
+    throw new Error('INVALID_AVATAR');
+  }
+
+  const bAvatarId = BigInt(avId);
+  const avatar = await prisma.avatars.findUnique({
+    where: { id: bAvatarId },
+  });
+
+  if (!avatar || !avatar.is_active) {
+    throw new Error('AVATAR_NOT_FOUND');
+  }
+
+  await prisma.users.update({
+    where: { id: bUserId },
+    data: {
+      avatar_id: bAvatarId,
+      updated_at: new Date(),
+    },
+  });
+
+  return await getCurrentUser(bUserId);
+}
+
+// ── Update User Email ────────────────────────────────────────
+export async function updateUserEmail(userId, email) {
+  const bUserId = typeof userId === 'bigint' ? userId : BigInt(userId);
+
+  if (!email || typeof email !== 'string') {
+    throw new Error('EMAIL_REQUIRED');
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  if (!isValidEmail(normalizedEmail)) {
+    throw new Error('INVALID_EMAIL');
+  }
+
+  const currentUser = await prisma.users.findUnique({
+    where: { id: bUserId },
+    select: { id: true, email: true },
+  });
+
+  if (!currentUser) {
+    throw new Error('USER_NOT_FOUND');
+  }
+
+  // If email is unchanged, return current user
+  if (currentUser.email === normalizedEmail) {
+    return await getCurrentUser(bUserId);
+  }
+
+  // Check if email is already taken by another user
+  const existingUser = await prisma.users.findFirst({
+    where: {
+      email: normalizedEmail,
+      id: { not: bUserId },
+    },
+  });
+
+  if (existingUser) {
+    throw new Error('EMAIL_EXISTS');
+  }
+
+  await prisma.users.update({
+    where: { id: bUserId },
+    data: {
+      email: normalizedEmail,
+      updated_at: new Date(),
+    },
+  });
+
+  return await getCurrentUser(bUserId);
+}
+
+
+
