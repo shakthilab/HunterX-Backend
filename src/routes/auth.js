@@ -258,6 +258,8 @@ router.post('/refresh', async (req, res, next) => {
       return error(res, 'User not found', 404);
     if (err.name === 'TokenExpiredError')
       return error(res, 'Refresh token expired — please login again', 401);
+    if (err.name === 'JsonWebTokenError')
+      return error(res, 'Invalid refresh token — please login again', 401);
     next(err);
   }
 });
