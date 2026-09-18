@@ -551,6 +551,7 @@ model users {
   onboarding_done                                         Boolean                    @default(false)
   onboarding_step                                         Int                        @default(0)
   is_banned                                               Boolean                    @default(false)
+  ban_reason                                              String?                    @db.VarChar(255)
   referral_code                                           String                     @unique @db.VarChar(8)
   referred_by                                             BigInt?
   gender                                                  user_gender?

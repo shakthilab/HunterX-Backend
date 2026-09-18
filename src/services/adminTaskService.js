@@ -36,7 +36,10 @@ function addDays(date, days) {
   return new Date(date.getTime() + days * MS_PER_DAY);
 }
 
-export async function createTask(adminId, body) {
+// Shared by createTask and updateTask — validates every field that isn't
+// create-only (is_default_daily, created_by, target_user_ids) and returns
+// a `tasks` row ready to hand to Prisma's create/update `data`.
+function buildTaskData(body) {
   const {
     title,
     description,
@@ -55,7 +58,6 @@ export async function createTask(adminId, body) {
     start_date,
     end_date,
     recurrence_days,
-    target_user_ids,
   } = body ?? {};
 
   if (!title?.trim()) throw new Error('TITLE_REQUIRED');
@@ -115,12 +117,9 @@ export async function createTask(adminId, body) {
     target_unit:    target_unit ?? null,
     level_target,
     is_recurring,
-    is_default_daily: false,
     start_date:     parsedStart,
     end_date:       parsedEnd,
     recurrence_days: [],
-    is_active:      true,
-    created_by:     BigInt(adminId),
   };
 
   if (task_type === 'WEEKLY') {
@@ -132,10 +131,20 @@ export async function createTask(adminId, body) {
     data.recurrence_days = [...new Set(recurrence_days)];
   }
 
+  return data;
+}
+
+export async function createTask(adminId, body) {
+  const data = buildTaskData(body);
+  data.is_default_daily = false; // not admin-settable — only the 3 seed-managed DAILY_FIXED tasks get this
+  data.is_active = true;
+  data.created_by = BigInt(adminId);
+
   // Only DAILY_ADMIN supports per-user targeting — the WEEKLY assignment
   // query (taskAssignmentService.js) doesn't consult task_admin_targets.
   let targetUserIds = [];
-  if (task_type === 'DAILY_ADMIN' && target_user_ids !== undefined) {
+  const { target_user_ids } = body ?? {};
+  if (data.task_type === 'DAILY_ADMIN' && target_user_ids !== undefined) {
     if (!Array.isArray(target_user_ids)) throw new Error('INVALID_TARGET_USER_IDS');
     try {
       targetUserIds = [...new Set(target_user_ids.map(id => BigInt(id)))];
@@ -167,5 +176,129 @@ export async function createTask(adminId, body) {
   return {
     ...task,
     target_user_ids: targetUserIds.length > 0 ? targetUserIds : null,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/admin/tasks — every admin-visible task (including the 3
+// seed-managed DAILY_FIXED routines), newest first.
+// ─────────────────────────────────────────────────────────────
+
+export async function listTasks() {
+  return prisma.tasks.findMany({ orderBy: { created_at: 'desc' } });
+}
+
+// ─────────────────────────────────────────────────────────────
+// PUT /api/admin/tasks/:id — edits an existing DAILY_ADMIN/WEEKLY task.
+// DAILY_FIXED routines are seed-managed and not editable here, same as
+// they're not creatable. task_type itself can't be changed on update
+// (changing DAILY_ADMIN <-> WEEKLY would invalidate the date window and
+// per-user targeting already on the task) — the body's task_type must
+// match the existing row.
+// ─────────────────────────────────────────────────────────────
+
+export async function updateTask(taskId, body) {
+  let id;
+  try {
+    id = BigInt(taskId);
+  } catch {
+    throw new Error('INVALID_TASK_ID');
+  }
+
+  const existing = await prisma.tasks.findUnique({ where: { id } });
+  if (!existing) throw new Error('TASK_NOT_FOUND');
+  if (existing.task_type === 'DAILY_FIXED') throw new Error('TASK_NOT_EDITABLE');
+  if (body?.task_type && body.task_type !== existing.task_type) throw new Error('TASK_TYPE_IMMUTABLE');
+
+  const data = buildTaskData({ ...body, task_type: existing.task_type });
+
+  try {
+    return await prisma.tasks.update({ where: { id }, data });
+  } catch (err) {
+    if (err.code === 'P2025') throw new Error('TASK_NOT_FOUND');
+    throw err;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/admin/tasks/:id/completions — every logged completion for
+// this task, newest first, capped at 200 rows.
+// ─────────────────────────────────────────────────────────────
+
+export async function getTaskCompletions(taskId) {
+  let id;
+  try {
+    id = BigInt(taskId);
+  } catch {
+    throw new Error('INVALID_TASK_ID');
+  }
+
+  const rows = await prisma.task_completions.findMany({
+    where:   { task_id: id },
+    orderBy: { completed_at: 'desc' },
+    take:    200,
+    select: {
+      id:             true,
+      schedule_date:  true,
+      status:         true,
+      progress_value: true,
+      xp_earned:      true,
+      completed_at:   true,
+      users:          { select: { id: true, name: true, hunter_id: true } },
+    },
+  });
+
+  return rows.map((row) => ({
+    id:            row.id.toString(),
+    user_id:       row.users.id.toString(),
+    user_name:     row.users.name,
+    hunter_id:     row.users.hunter_id,
+    date:          row.completed_at ?? row.schedule_date,
+    value_achieved: row.progress_value,
+    status:        row.status,
+    xp_earned:     row.xp_earned,
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/admin/tasks/:id/assignment-stats — how many users this task
+// has been scheduled for, what fraction completed it, and how long that
+// typically took (time from assignment to completion).
+// ─────────────────────────────────────────────────────────────
+
+export async function getTaskAssignmentStats(taskId) {
+  let id;
+  try {
+    id = BigInt(taskId);
+  } catch {
+    throw new Error('INVALID_TASK_ID');
+  }
+
+  const [usersAssigned, completions] = await Promise.all([
+    prisma.task_schedule.groupBy({ by: ['user_id'], where: { task_id: id } }),
+    prisma.task_completions.findMany({
+      where:  { task_id: id },
+      select: { schedule_date: true, completed_at: true },
+    }),
+  ]);
+
+  const assignedCount = usersAssigned.length;
+  const completionRate = assignedCount > 0
+    ? Math.round((completions.length / assignedCount) * 100)
+    : 0;
+
+  const durationsMin = completions
+    .filter((c) => c.completed_at)
+    .map((c) => (c.completed_at.getTime() - c.schedule_date.getTime()) / 60000)
+    .filter((min) => min >= 0);
+
+  const avgCompletionTimeMin = durationsMin.length > 0
+    ? Math.round(durationsMin.reduce((sum, m) => sum + m, 0) / durationsMin.length)
+    : 0;
+
+  return {
+    users_assigned:          assignedCount,
+    completion_rate:         completionRate,
+    avg_completion_time_min: avgCompletionTimeMin,
   };
 }

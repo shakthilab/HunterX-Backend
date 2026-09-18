@@ -10,6 +10,7 @@
 
 import prisma from '../config/prisma.js';
 import { parseDateOnly, getISTDateOnly } from '../utils/helpers.js';
+import { checkLevelUp } from './xpService.js';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MS_PER_DAY     = 24 * 60 * 60 * 1000;
@@ -253,4 +254,159 @@ export async function listUsers(query = {}) {
       has_next_page: page * limit < total,
     },
   };
+}
+
+function toBigIntId(id) {
+  try {
+    return BigInt(id);
+  } catch {
+    throw new Error('INVALID_USER_ID');
+  }
+}
+
+// Row shape returned by the moderation actions below — the same fields as
+// a listUsers() item, plus the extra detail the Users detail page's Actions
+// panel needs (xp, dragon stage, body stats, ban reason). Kept as one raw
+// snake_case shape (mapped to the frontend's User type client-side) rather
+// than a bespoke response per action.
+async function loadUserDetailRow(id) {
+  const user = await prisma.users.findUnique({
+    where:  { id },
+    select: {
+      id:         true,
+      hunter_id:  true,
+      name:       true,
+      email:      true,
+      is_banned:  true,
+      ban_reason: true,
+      created_at: true,
+      dragon_stage: true,
+      height_cm:  true,
+      weight_kg:  true,
+      bmi:        true,
+      avatars:    { select: { image_url: true } },
+      auth_providers: { select: { provider: true } },
+      user_progression: {
+        select: { current_level: true, total_xp: true, daily_streak: true, longest_streak: true },
+      },
+    },
+  });
+  if (!user) throw new Error('USER_NOT_FOUND');
+
+  const currentLevel = user.user_progression?.current_level ?? 1;
+  const levelRow = await prisma.levels.findUnique({
+    where:  { level_number: currentLevel },
+    select: { rank_name: true },
+  });
+
+  return {
+    id:              user.id.toString(),
+    hunter_id:       user.hunter_id,
+    name:            user.name,
+    email:           user.email,
+    avatar_url:      user.avatars?.image_url ?? null,
+    level:           currentLevel,
+    rank:            levelRow?.rank_name ?? null,
+    xp:              user.user_progression?.total_xp ?? 0,
+    streak:          user.user_progression?.daily_streak ?? 0,
+    longest_streak:  user.user_progression?.longest_streak ?? 0,
+    dragon_stage:    user.dragon_stage,
+    height_cm:       user.height_cm,
+    weight_kg:       user.weight_kg,
+    bmi:             user.bmi,
+    status:          user.is_banned ? 'BANNED' : 'ACTIVE',
+    ban_reason:      user.ban_reason,
+    signup_date:     user.created_at,
+    auth_providers:  user.auth_providers.map((p) => p.provider),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/admin/users/:id/ban — set is_banned + record why.
+// ─────────────────────────────────────────────────────────────
+
+export async function banUser(userId, reason) {
+  const id = toBigIntId(userId);
+  try {
+    await prisma.users.update({
+      where: { id },
+      data:  { is_banned: true, ban_reason: reason?.trim() || null },
+    });
+  } catch (err) {
+    if (err.code === 'P2025') throw new Error('USER_NOT_FOUND');
+    throw err;
+  }
+  return loadUserDetailRow(id);
+}
+
+// ─────────────────────────────────────────────────────────────
+// PATCH /api/admin/users/:id/unban
+// ─────────────────────────────────────────────────────────────
+
+export async function unbanUser(userId) {
+  const id = toBigIntId(userId);
+  try {
+    await prisma.users.update({
+      where: { id },
+      data:  { is_banned: false, ban_reason: null },
+    });
+  } catch (err) {
+    if (err.code === 'P2025') throw new Error('USER_NOT_FOUND');
+    throw err;
+  }
+  return loadUserDetailRow(id);
+}
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/admin/users/:id/xp-adjustment — manual XP grant/deduction,
+// logged to xp_transactions (task_id null = admin-originated) and run
+// through the same level-up detection a task completion would trigger.
+// Body: { delta: number (non-zero integer), reason: string }
+// ─────────────────────────────────────────────────────────────
+
+export async function adjustUserXp(userId, delta, reason) {
+  const id = toBigIntId(userId);
+
+  if (!Number.isInteger(delta) || delta === 0) throw new Error('INVALID_DELTA');
+  if (!reason?.trim()) throw new Error('REASON_REQUIRED');
+
+  await prisma.$transaction(async (tx) => {
+    const progression = await tx.user_progression.findUnique({ where: { user_id: id } });
+    if (!progression) throw new Error('USER_NOT_FOUND');
+
+    const newTotal = Math.max(0, progression.total_xp + delta);
+    await tx.user_progression.update({
+      where: { user_id: id },
+      data:  { total_xp: newTotal },
+    });
+
+    await tx.xp_transactions.create({
+      data: { user_id: id, task_id: null, amount: delta, reason: reason.trim() },
+    });
+
+    if (newTotal > progression.total_xp) await checkLevelUp(tx, id);
+  });
+
+  return loadUserDetailRow(id);
+}
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/admin/users/:id/reset-streak — zeroes the current daily
+// streak (mirrors how a naturally broken streak resets it; see
+// streakService.js#resolveStreakRisk). longest_streak is a historical
+// record and is left untouched, matching the confirm-dialog copy.
+// ─────────────────────────────────────────────────────────────
+
+export async function resetUserStreak(userId) {
+  const id = toBigIntId(userId);
+  try {
+    await prisma.user_progression.update({
+      where: { user_id: id },
+      data:  { daily_streak: 0, consecutive_miss_days: 0 },
+    });
+  } catch (err) {
+    if (err.code === 'P2025') throw new Error('USER_NOT_FOUND');
+    throw err;
+  }
+  return loadUserDetailRow(id);
 }
